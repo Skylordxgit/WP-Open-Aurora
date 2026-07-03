@@ -70,7 +70,10 @@ export const MessageBubble = memo(function MessageBubble({
   const hasMediaPayload = !!mediaInfo && !!mediaInfo.data;
 
   const hasTextBody = !!msg.body && (!mediaInfo || msg.body !== mediaInfo.filename);
-  const needsMediaDownload = !hasMediaPayload && DOWNLOADABLE_MEDIA_TYPES.has(msg.type) && !isRevoked;
+  // Any message that carries media metadata is downloadable, even when its type is
+  // odd/legacy ('unknown', engine-specific tokens) — otherwise real media rendered
+  // as a dead "Media message" label with no way to load it.
+  const needsMediaDownload = !hasMediaPayload && !isRevoked && (DOWNLOADABLE_MEDIA_TYPES.has(msg.type) || !!mediaInfo);
 
   return (
     <div

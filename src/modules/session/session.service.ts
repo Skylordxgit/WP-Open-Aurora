@@ -43,7 +43,6 @@ interface ReconnectState {
 export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicationBootstrap {
   private readonly logger = createLogger('SessionService');
   private static readonly CHAT_FETCH_TIMEOUT_MS = 15_000;
-  private static readonly CHAT_FALLBACK_MESSAGE_SCAN = 250;
 
   // In-memory map of active engine instances
   private engines: Map<string, IWhatsAppEngine> = new Map();
@@ -906,59 +905,103 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     }
   }
 
-  private async getChatsFromStoredMessages(sessionId: string): Promise<ChatSummary[]> {
-    // Order by the message timestamp (not createdAt): backfilled history is inserted "now" with old
-    // timestamps, so a createdAt scan would pick the wrong "last message" per chat and surface stale
-    // rows. Ordering by timestamp makes the first row seen per chat its genuine latest message.
-    const messages = await this.messageRepository
+  /** True for ids that must never surface as chats (phantom 0@c.us artifacts, status pseudo-chat). */
+  private static isJunkChatId(chatId: string): boolean {
+    const local = (chatId || '').split('@')[0];
+    return !chatId || !local || /^0+$/.test(local) || chatId === 'status@broadcast';
+  }
+
+  /**
+   * The genuine latest stored message of EVERY chat this session has ever
+   * persisted — no scan cap and no date window, so chats with only old history
+   * still appear. Implemented as a latest-per-chat aggregation (GROUP BY chatId
+   * on MAX(timestamp), joined back for the row) that works on SQLite + Postgres.
+   */
+  private async latestStoredMessageByChat(sessionId: string): Promise<Map<string, Message>> {
+    const sub = this.messageRepository
+      .createQueryBuilder('m2')
+      .select('m2.chatId', 'agg_chat')
+      .addSelect('MAX(COALESCE(m2.timestamp, 0))', 'agg_ts')
+      .where('m2.sessionId = :sessionId')
+      .groupBy('m2.chatId');
+
+    const rows = await this.messageRepository
       .createQueryBuilder('message')
-      .where('message.sessionId = :sessionId', { sessionId })
-      .orderBy('COALESCE(message.timestamp, 99999999999)', 'DESC')
-      .addOrderBy('message.createdAt', 'DESC')
-      .take(SessionService.CHAT_FALLBACK_MESSAGE_SCAN)
+      .innerJoin(
+        `(${sub.getQuery()})`,
+        'agg',
+        'agg.agg_chat = message.chatId AND COALESCE(message.timestamp, 0) = agg.agg_ts',
+      )
+      .where('message.sessionId = :sessionId')
+      .setParameter('sessionId', sessionId)
+      .orderBy('message.createdAt', 'DESC')
       .getMany();
 
-    // Resolve real contact names/phones for the stored fallback so the chat list
-    // never surfaces a raw LID/JID (the live engine path resolves names itself).
-    const savedMap = await this.contactResolver.loadSavedMap();
+    // Two messages can share the max timestamp; rows are createdAt DESC, so the
+    // first seen per chat is the newest row — keep it, drop the rest.
+    const latest = new Map<string, Message>();
+    for (const row of rows) {
+      if (!latest.has(row.chatId)) latest.set(row.chatId, row);
+    }
+    return latest;
+  }
 
-    const chats = new Map<string, ChatSummary>();
-    for (const message of messages) {
-      if (!message.chatId || chats.has(message.chatId)) {
+  /** Build a ChatSummary from a chat's latest stored message, with contact resolution. */
+  private summaryFromStoredMessage(
+    sessionId: string,
+    message: Message,
+    savedMap: Map<string, Map<string, string>>,
+  ): ChatSummary {
+    const metaPhone =
+      message.metadata && typeof message.metadata.senderPhone === 'string'
+        ? (message.metadata.senderPhone as string)
+        : null;
+    const resolved = this.contactResolver.resolve({ sessionId, chatId: message.chatId, savedMap, metaPhone });
+    return {
+      id: message.chatId,
+      name: message.chatId,
+      displayName: resolved.displayName,
+      phone: resolved.phone,
+      isGroup: message.chatId.endsWith('@g.us'),
+      unreadCount: 0,
+      timestamp:
+        typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) && message.timestamp > 0
+          ? message.timestamp
+          : Math.floor(message.createdAt.getTime() / 1000),
+      lastMessage: message.body || undefined,
+      lastMessageType: message.type || undefined,
+    };
+  }
+
+  private async getChatsFromStoredMessages(sessionId: string): Promise<ChatSummary[]> {
+    const savedMap = await this.contactResolver.loadSavedMap();
+    const latest = await this.latestStoredMessageByChat(sessionId);
+
+    const result: ChatSummary[] = [];
+    let skippedJunk = 0;
+    for (const [chatId, message] of latest) {
+      if (SessionService.isJunkChatId(chatId)) {
+        skippedJunk += 1;
         continue;
       }
-
-      const metaPhone =
-        message.metadata && typeof message.metadata.senderPhone === 'string'
-          ? (message.metadata.senderPhone as string)
-          : null;
-      const resolved = this.contactResolver.resolve({
-        sessionId,
-        chatId: message.chatId,
-        savedMap,
-        metaPhone,
-      });
-
-      chats.set(message.chatId, {
-        id: message.chatId,
-        name: message.chatId,
-        displayName: resolved.displayName,
-        phone: resolved.phone,
-        isGroup: message.chatId.endsWith('@g.us'),
-        unreadCount: 0,
-        timestamp:
-          typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)
-            ? message.timestamp
-            : Math.floor(message.createdAt.getTime() / 1000),
-        lastMessage: message.body || undefined,
-        lastMessageType: message.type || undefined,
-      });
+      result.push(this.summaryFromStoredMessage(sessionId, message, savedMap));
     }
+    result.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
-    const result = [...chats.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    const oldest = result.length ? result[result.length - 1].timestamp : null;
+    const newest = result.length ? result[0].timestamp : null;
     this.logger.debug(
-      `getChats(stored fallback): scanned ${messages.length} messages -> ${result.length} chats for session ${sessionId}`,
-      { sessionId, action: 'get_chats_stored', scanned: messages.length, chats: result.length },
+      `getChats(stored fallback): ${latest.size} DB chats -> ${result.length} returned for session ${sessionId}` +
+        (skippedJunk ? ` (skipped ${skippedJunk} junk id(s))` : ''),
+      {
+        sessionId,
+        action: 'get_chats_stored',
+        dbChats: latest.size,
+        returned: result.length,
+        skippedJunk,
+        oldestTimestamp: oldest,
+        newestTimestamp: newest,
+      },
     );
     return result;
   }
@@ -993,6 +1036,11 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         }
       }
 
+      // Latest stored message per chat: fills missing last-message previews on live
+      // chats (the engine often has no lastMessage for chats it hasn't lazily
+      // loaded) and re-surfaces chats that exist only in our stored history.
+      const latestStored = await this.latestStoredMessageByChat(sessionId);
+
       const enriched = chats.map(chat => {
         const resolved = this.contactResolver.resolve({
           sessionId,
@@ -1003,12 +1051,56 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
           // group subject) participates with lower priority than a saved name.
           engineName: chat.name || null,
         });
-        return { ...chat, displayName: resolved.displayName, phone: resolved.phone };
+        const summary: ChatSummary = { ...chat, displayName: resolved.displayName, phone: resolved.phone };
+        // "No messages yet" fix: when the engine has no preview, use the DB's
+        // genuine latest message (body / type / timestamp) for this chat.
+        const stored = latestStored.get(chat.id);
+        if (stored && !summary.lastMessage && !summary.lastMessageType) {
+          summary.lastMessage = stored.body || undefined;
+          summary.lastMessageType = stored.type || undefined;
+          if (!summary.timestamp) {
+            summary.timestamp =
+              typeof stored.timestamp === 'number' && Number.isFinite(stored.timestamp) && stored.timestamp > 0
+                ? stored.timestamp
+                : Math.floor(stored.createdAt.getTime() / 1000);
+          }
+        }
+        return summary;
       });
 
+      // Merge in DB-only chats (observed historically but absent from the live
+      // list — e.g. old conversations the engine's store no longer surfaces).
+      const liveIds = new Set(chats.map(c => c.id));
+      let mergedFromDb = 0;
+      let skippedJunk = 0;
+      for (const [chatId, message] of latestStored) {
+        if (liveIds.has(chatId)) continue;
+        if (SessionService.isJunkChatId(chatId)) {
+          skippedJunk += 1;
+          continue;
+        }
+        enriched.push(this.summaryFromStoredMessage(sessionId, message, savedMap));
+        mergedFromDb += 1;
+      }
+      enriched.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+      const oldest = enriched.length ? enriched[enriched.length - 1].timestamp : null;
+      const newest = enriched.length ? enriched[0].timestamp : null;
       this.logger.debug(
-        `getChats(live): ${chats.length} chats from engine, ${enriched.length} returned for session ${sessionId}`,
-        { sessionId, action: 'get_chats_live', fetched: chats.length, returned: enriched.length },
+        `getChats(live): ${chats.length} engine chats + ${mergedFromDb} DB-only (of ${latestStored.size} DB chats) -> ` +
+          `${enriched.length} returned for session ${sessionId}` +
+          (skippedJunk ? ` (skipped ${skippedJunk} junk id(s))` : ''),
+        {
+          sessionId,
+          action: 'get_chats_live',
+          engineChats: chats.length,
+          dbChats: latestStored.size,
+          mergedFromDb,
+          returned: enriched.length,
+          skippedJunk,
+          oldestTimestamp: oldest,
+          newestTimestamp: newest,
+        },
       );
       return enriched;
     } catch (error) {
@@ -1137,7 +1229,10 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       const n = raw ? parseInt(raw, 10) : NaN;
       return Number.isFinite(n) ? Math.min(Math.max(n, 1), max) : def;
     };
-    const maxChats = clampInt(process.env.HISTORY_BACKFILL_MAX_CHATS, 100, 1000);
+    // Default to importing history for ALL chats the engine exposes (up to the hard cap):
+    // capping at 100 chats silently left every older conversation with no stored history,
+    // which surfaced as "old chats missing" in the dashboard. Env vars still override.
+    const maxChats = clampInt(process.env.HISTORY_BACKFILL_MAX_CHATS, 2000, 5000);
     const perChat = clampInt(process.env.HISTORY_BACKFILL_PER_CHAT, 100, 500);
 
     let chats: ChatSummary[];

@@ -30,6 +30,31 @@ function createMockSession(overrides: Partial<Session> = {}): Session {
   };
 }
 
+/**
+ * Chainable query-builder stub for the latest-message-per-chat aggregation used
+ * by getChats (subquery + self-join). `getMany` resolves the given rows.
+ */
+function makeChatAggQb(rows: unknown[]): Record<string, jest.Mock> {
+  const qb: Record<string, jest.Mock> = {} as Record<string, jest.Mock>;
+  for (const method of [
+    'select',
+    'addSelect',
+    'where',
+    'andWhere',
+    'groupBy',
+    'innerJoin',
+    'setParameter',
+    'orderBy',
+    'addOrderBy',
+    'take',
+  ]) {
+    qb[method] = jest.fn().mockReturnValue(qb);
+  }
+  qb.getQuery = jest.fn().mockReturnValue('SELECT 1');
+  qb.getMany = jest.fn().mockResolvedValue(rows);
+  return qb;
+}
+
 describe('SessionService', () => {
   let service: SessionService;
   let repository: jest.Mocked<Partial<Repository<Session>>>;
@@ -58,7 +83,7 @@ describe('SessionService', () => {
       create: jest.fn(),
       save: jest.fn().mockResolvedValue(undefined),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
-      createQueryBuilder: jest.fn(),
+      createQueryBuilder: jest.fn(() => makeChatAggQb([])),
     };
 
     dataSource = {
@@ -784,24 +809,15 @@ describe('SessionService', () => {
       await service.start('sess-uuid-1');
 
       mockEngine.getChats.mockRejectedValue(new Error('Timed out waiting for WhatsApp chat list'));
-      const fallbackQb = {
-        where: jest.fn().mockReturnThis(),
-        orderBy: jest.fn().mockReturnThis(),
-        addOrderBy: jest.fn().mockReturnThis(),
-        take: jest.fn().mockReturnThis(),
-        getMany: jest.fn().mockResolvedValue([
-          { sessionId: 'sess-uuid-1', chatId: '120363000@g.us', body: 'Latest group message', timestamp: 1700000100, createdAt },
-          { sessionId: 'sess-uuid-1', chatId: '628123456789@c.us', body: 'Hello', timestamp: 1700000000, createdAt: new Date('2026-06-19T07:59:00Z') },
-        ]),
-      };
+      // Latest-per-chat aggregation: one row per chat (its genuine latest message).
+      const fallbackQb = makeChatAggQb([
+        { sessionId: 'sess-uuid-1', chatId: '120363000@g.us', body: 'Latest group message', timestamp: 1700000100, createdAt },
+        { sessionId: 'sess-uuid-1', chatId: '628123456789@c.us', body: 'Hello', timestamp: 1700000000, createdAt: new Date('2026-06-19T07:59:00Z') },
+      ]);
       (messageRepository.createQueryBuilder as jest.Mock).mockReturnValue(fallbackQb);
 
       const result = await service.getChats('sess-uuid-1');
 
-      // Fallback must order by the message timestamp (so backfilled rows surface their true latest
-      // message), not by createdAt (row-insert time).
-      expect(fallbackQb.orderBy).toHaveBeenCalledWith('COALESCE(message.timestamp, 99999999999)', 'DESC');
-      expect(fallbackQb.take).toHaveBeenCalledWith(250);
       expect(result).toEqual([
         expect.objectContaining({
           id: '120363000@g.us',
@@ -825,21 +841,15 @@ describe('SessionService', () => {
     it('should serve stored chat history when session is not started (offline fallback)', async () => {
       const session = createMockSession();
       (repository.findOne as jest.Mock).mockResolvedValue(session);
-      const fallbackQb = {
-        where: jest.fn().mockReturnThis(),
-        orderBy: jest.fn().mockReturnThis(),
-        addOrderBy: jest.fn().mockReturnThis(),
-        take: jest.fn().mockReturnThis(),
-        getMany: jest.fn().mockResolvedValue([
-          {
-            sessionId: 'sess-uuid-1',
-            chatId: '628123456789@c.us',
-            body: 'Hello',
-            timestamp: 1700000000,
-            createdAt: new Date('2026-06-19T07:59:00Z'),
-          },
-        ]),
-      };
+      const fallbackQb = makeChatAggQb([
+        {
+          sessionId: 'sess-uuid-1',
+          chatId: '628123456789@c.us',
+          body: 'Hello',
+          timestamp: 1700000000,
+          createdAt: new Date('2026-06-19T07:59:00Z'),
+        },
+      ]);
       (messageRepository.createQueryBuilder as jest.Mock).mockReturnValue(fallbackQb);
 
       const result = await service.getChats('sess-uuid-1');

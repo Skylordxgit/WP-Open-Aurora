@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import {
   Search,
@@ -493,7 +493,7 @@ export function Chats() {
   // Never touches other rows, and suppresses the next auto-scroll so loading media doesn't yank the
   // view — keeping the scroll position stable while the user browses history.
   const handleDownloadMedia = useCallback(
-    async (msg: ChatMessageView) => {
+    async (msg: ChatMessageView, opts: { silent?: boolean } = {}) => {
       if (!activeChat) return;
       const key = msg.id;
       const remoteId = msg.waMessageId || msg.id;
@@ -521,14 +521,43 @@ export function Chats() {
         });
       } catch (err) {
         setMediaDownloads(prev => ({ ...prev, [key]: 'error' }));
-        showErrorToast(
-          t('chats.errors.loadMedia', { defaultValue: 'Failed to load media' }),
-          err instanceof Error ? err.message : undefined,
-        );
+        // Auto-loads fail silently (the bubble shows its error state + reason on
+        // hover); only user-initiated downloads surface a toast.
+        if (!opts.silent) {
+          showErrorToast(
+            t('chats.errors.loadMedia', { defaultValue: 'Failed to load media' }),
+            err instanceof Error ? err.message : undefined,
+          );
+        }
       }
     },
     [activeChat, showErrorToast, t],
   );
+
+  // WhatsApp-Web-like inline media: auto-load images and stickers of the loaded
+  // page (newest first, bounded per pass) instead of requiring a click. Video,
+  // voice, audio and documents stay click-to-load. Each message is attempted at
+  // most once per chat visit; failures leave the click-to-retry placeholder.
+  const autoMediaAttemptedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    autoMediaAttemptedRef.current = new Set();
+  }, [activeChat?.sessionId, activeChat?.id]);
+  useEffect(() => {
+    if (!activeChat) return;
+    const candidates = messages
+      .filter(
+        m =>
+          (m.type === 'image' || m.type === 'sticker') &&
+          !m.metadata?.media?.data &&
+          !autoMediaAttemptedRef.current.has(m.id) &&
+          mediaDownloads[m.id] === undefined,
+      )
+      .slice(-12); // bound each pass to the newest few, like WhatsApp Web's lazy loading
+    for (const m of candidates) {
+      autoMediaAttemptedRef.current.add(m.id);
+      void handleDownloadMedia(m, { silent: true });
+    }
+  }, [messages, activeChat, mediaDownloads, handleDownloadMedia]);
 
   const handleReactMessage = useCallback(
     async (msg: ChatMessageView, emoji: string) => {
@@ -673,11 +702,40 @@ export function Chats() {
     }
   }, [messages]);
 
-  // Track whether the message view is scrolled near the bottom (drives the auto-scroll decision).
+  // Track whether the message view is scrolled near the bottom (drives the auto-scroll decision),
+  // and auto-load older history when the reader scrolls near the top (WhatsApp-Web-style infinite
+  // scroll; the "Load older messages" button stays as an explicit affordance).
+  const roomMessagesRef = useRef<HTMLDivElement | null>(null);
+  const olderReqInFlightRef = useRef(false);
+  const prependScrollHeightRef = useRef<number | null>(null);
   const handleMessagesScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
     isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (
+      el.scrollTop < 80 &&
+      !olderReqInFlightRef.current &&
+      !loadingMessages &&
+      !reachedOldest &&
+      messages.length > 0
+    ) {
+      olderReqInFlightRef.current = true;
+      prependScrollHeightRef.current = el.scrollHeight;
+      void loadOlderMessages().finally(() => {
+        olderReqInFlightRef.current = false;
+      });
+    }
   };
+
+  // After older messages are prepended, restore the reader's position by the height delta so the
+  // view doesn't jump (the browser keeps scrollTop, which would otherwise land on the new content).
+  useLayoutEffect(() => {
+    const el = roomMessagesRef.current;
+    if (el && prependScrollHeightRef.current != null) {
+      const delta = el.scrollHeight - prependScrollHeightRef.current;
+      if (delta > 0) el.scrollTop += delta;
+      prependScrollHeightRef.current = null;
+    }
+  }, [messages]);
 
   // Jump to (and briefly highlight) the original message referenced by a reply card. Scrolling
   // and the flash are purely presentational — they never trigger a refetch.
@@ -1210,7 +1268,7 @@ export function Chats() {
                   onMoreClick={() => setShowInfo(true)}
                 />
 
-                <div className="room-messages" onScroll={handleMessagesScroll}>
+                <div className="room-messages" ref={roomMessagesRef} onScroll={handleMessagesScroll}>
                   {!loadingMessages && messages.length > 0 && !reachedOldest && (
                     <div className="load-older-row">
                       <button
