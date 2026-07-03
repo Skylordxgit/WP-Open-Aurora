@@ -168,11 +168,15 @@ export function Chats() {
       try {
         setLoadingSessions(true);
         const list = await sessionApi.list();
-        const readySessions = list.filter(s => s.status === 'ready');
-        setSessions(readySessions);
-        if (readySessions.length > 0) {
-          setSelectedSessionId(readySessions[0].id);
-          setSelectedChannelIds(readySessions.map(s => s.id));
+        // Include ALL sessions, not just connected ones: the backend serves stored
+        // chat history for offline sessions, so hiding them made every chat vanish
+        // after a backend restart. Connected sessions sort first.
+        const ordered = [...list].sort((a, b) => Number(b.status === 'ready') - Number(a.status === 'ready'));
+        setSessions(ordered);
+        if (ordered.length > 0) {
+          const preferred = ordered.find(s => s.status === 'ready') ?? ordered[0];
+          setSelectedSessionId(preferred.id);
+          setSelectedChannelIds(ordered.map(s => s.id));
         }
       } catch (err) {
         showErrorToast(t('chats.errors.loadSessions'), err instanceof Error ? err.message : undefined);
@@ -209,6 +213,12 @@ export function Chats() {
       // A newer load started while this one was in flight — discard this (stale) result entirely.
       if (reqId !== loadChatsReqRef.current) return;
       const merged = perChannel.flat().sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      // Debug: chat-flow counts (API -> render). Per-channel counts + failures.
+      console.debug(
+        `[chats] loaded ${merged.length} chats from ${sessionIds.length} channel(s)`,
+        perChannel.map((c, i) => `${sessionIds[i]}: ${c.length}`),
+        failed.length ? `failed: ${failed.join(', ')}` : '',
+      );
       setChats(merged);
       setFailedChannelIds(failed);
       setLoadingChats(false);

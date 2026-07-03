@@ -2,7 +2,7 @@ import { memo } from 'react';
 import { Users, User } from 'lucide-react';
 import type { ChatWithSession } from './types';
 import type { Label } from '../../services/api';
-import { formatChatTime, highlightMatch, formatContactDisplay } from './helpers';
+import { formatChatTime, highlightMatch, formatContactDisplay, messagePreviewFallback } from './helpers';
 import { LabelChip } from './LabelChip';
 
 interface ChatRowProps {
@@ -27,7 +27,9 @@ export const ChatRow = memo(function ChatRow({
   onSelect,
 }: ChatRowProps) {
   const displayName = formatContactDisplay(chat.displayName ?? chat.name, chat.id);
-  const snippet = chat.lastMessage || '';
+  // Body text wins; media/deleted messages have no body, so fall back to a typed
+  // preview ("📷 Photo", "🎤 Voice message", …) like WhatsApp Web.
+  const snippet = chat.lastMessage || messagePreviewFallback(chat.lastMessageType);
   const visibleLabels = labels.slice(0, 2);
   const extraLabels = labels.length - visibleLabels.length;
 

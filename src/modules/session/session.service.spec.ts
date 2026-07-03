@@ -9,6 +9,7 @@ import { EngineFactory } from '../../engine/engine.factory';
 import { EventsGateway } from '../events/events.gateway';
 import { WebhookService } from '../webhook/webhook.service';
 import { HookManager } from '../../core/hooks';
+import { ContactResolverService } from '../contact-resolver/contact-resolver.service';
 import { IncomingMessage, EngineEventCallbacks } from '../../engine/interfaces/whatsapp-engine.interface';
 
 function createMockSession(overrides: Partial<Session> = {}): Session {
@@ -123,6 +124,13 @@ describe('SessionService', () => {
         { provide: EventsGateway, useValue: eventsGateway },
         { provide: WebhookService, useValue: webhookService },
         { provide: HookManager, useValue: hookManager },
+        {
+          provide: ContactResolverService,
+          useValue: {
+            loadSavedMap: jest.fn().mockResolvedValue(new Map()),
+            resolve: jest.fn().mockReturnValue({ displayName: null, phone: null }),
+          },
+        },
       ],
     }).compile();
 
@@ -762,7 +770,9 @@ describe('SessionService', () => {
       const result = await service.getChats('sess-uuid-1');
 
       expect(mockEngine.getChats).toHaveBeenCalled();
-      expect(result).toEqual(chats);
+      // Live chats are enriched with resolved contact identity (displayName/phone)
+      // before being returned; the engine payload itself passes through untouched.
+      expect(result).toEqual(chats.map(c => expect.objectContaining(c)));
     });
 
     it('should fall back to stored messages when engine.getChats hangs or fails', async () => {
@@ -793,30 +803,50 @@ describe('SessionService', () => {
       expect(fallbackQb.orderBy).toHaveBeenCalledWith('COALESCE(message.timestamp, 99999999999)', 'DESC');
       expect(fallbackQb.take).toHaveBeenCalledWith(250);
       expect(result).toEqual([
-        {
+        expect.objectContaining({
           id: '120363000@g.us',
           name: '120363000@g.us',
           isGroup: true,
           unreadCount: 0,
           timestamp: 1700000100,
           lastMessage: 'Latest group message',
-        },
-        {
+        }),
+        expect.objectContaining({
           id: '628123456789@c.us',
           name: '628123456789@c.us',
           isGroup: false,
           unreadCount: 0,
           timestamp: 1700000000,
           lastMessage: 'Hello',
-        },
+        }),
       ]);
     });
 
-    it('should throw BadRequestException when session is not started', async () => {
+    it('should serve stored chat history when session is not started (offline fallback)', async () => {
       const session = createMockSession();
       (repository.findOne as jest.Mock).mockResolvedValue(session);
+      const fallbackQb = {
+        where: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        addOrderBy: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue([
+          {
+            sessionId: 'sess-uuid-1',
+            chatId: '628123456789@c.us',
+            body: 'Hello',
+            timestamp: 1700000000,
+            createdAt: new Date('2026-06-19T07:59:00Z'),
+          },
+        ]),
+      };
+      (messageRepository.createQueryBuilder as jest.Mock).mockReturnValue(fallbackQb);
 
-      await expect(service.getChats('sess-uuid-1')).rejects.toThrow(BadRequestException);
+      const result = await service.getChats('sess-uuid-1');
+
+      expect(result).toEqual([
+        expect.objectContaining({ id: '628123456789@c.us', lastMessage: 'Hello' }),
+      ]);
     });
   });
 

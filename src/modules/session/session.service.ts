@@ -889,12 +889,13 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     }
 
     try {
-      return await Promise.race([
+      const live = await Promise.race([
         engine.getChats(),
         new Promise<ChatSummary[]>((_, reject) => {
           setTimeout(() => reject(new Error('Timed out waiting for WhatsApp chat list')), SessionService.CHAT_FETCH_TIMEOUT_MS);
         }),
       ]);
+      return await this.enrichChatsWithContacts(id, live);
     } catch (error) {
       this.logger.warn(`Live chat fetch failed for session ${id}; falling back to stored messages`, {
         sessionId: id,
@@ -950,10 +951,73 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
             ? message.timestamp
             : Math.floor(message.createdAt.getTime() / 1000),
         lastMessage: message.body || undefined,
+        lastMessageType: message.type || undefined,
       });
     }
 
-    return [...chats.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    const result = [...chats.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    this.logger.debug(
+      `getChats(stored fallback): scanned ${messages.length} messages -> ${result.length} chats for session ${sessionId}`,
+      { sessionId, action: 'get_chats_stored', scanned: messages.length, chats: result.length },
+    );
+    return result;
+  }
+
+  /**
+   * Attach resolved contact identity (displayName/phone) to live engine chats so
+   * the UI shows saved names / push names / phones — never a raw LID. Best-effort
+   * and read-only: on any failure the chats are returned unenriched rather than
+   * failing the request. LID→phone uses the senderPhone values already persisted
+   * on this session's stored messages (one query), not per-chat engine calls, so
+   * the hot chat-list path stays fast.
+   */
+  private async enrichChatsWithContacts(sessionId: string, chats: ChatSummary[]): Promise<ChatSummary[]> {
+    try {
+      const savedMap = await this.contactResolver.loadSavedMap();
+
+      // One query: latest known senderPhone per @lid chat from stored messages.
+      const lidIds = chats.filter(c => c.id.endsWith('@lid')).map(c => c.id);
+      const lidPhone = new Map<string, string>();
+      if (lidIds.length > 0) {
+        const rows = await this.messageRepository
+          .createQueryBuilder('message')
+          .select(['message.chatId', 'message.metadata'])
+          .where('message.sessionId = :sessionId', { sessionId })
+          .andWhere('message.chatId IN (:...lidIds)', { lidIds })
+          .orderBy('message.createdAt', 'DESC')
+          .take(500)
+          .getMany();
+        for (const row of rows) {
+          const phone = row.metadata && typeof row.metadata.senderPhone === 'string' ? row.metadata.senderPhone : null;
+          if (phone && !lidPhone.has(row.chatId)) lidPhone.set(row.chatId, phone);
+        }
+      }
+
+      const enriched = chats.map(chat => {
+        const resolved = this.contactResolver.resolve({
+          sessionId,
+          chatId: chat.id,
+          savedMap,
+          metaPhone: lidPhone.get(chat.id) ?? null,
+          // Engine-supplied chat name (contact name / push name / verified name /
+          // group subject) participates with lower priority than a saved name.
+          engineName: chat.name || null,
+        });
+        return { ...chat, displayName: resolved.displayName, phone: resolved.phone };
+      });
+
+      this.logger.debug(
+        `getChats(live): ${chats.length} chats from engine, ${enriched.length} returned for session ${sessionId}`,
+        { sessionId, action: 'get_chats_live', fetched: chats.length, returned: enriched.length },
+      );
+      return enriched;
+    } catch (error) {
+      this.logger.warn(`Chat contact enrichment failed for session ${sessionId}; returning unenriched chats`, {
+        sessionId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return chats;
+    }
   }
 
   /** Build the persisted `metadata` blob (media / quoted message / resolved LID phone), or undefined. */

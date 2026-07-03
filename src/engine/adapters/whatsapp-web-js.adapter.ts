@@ -44,7 +44,12 @@ import {
   WwjsChannelData,
   GroupCreateResult,
 } from '../types/whatsapp-web-js.types';
-import { buildIncomingMessageBase, extractWwebjsMediaMeta, type WwebjsMediaRawData } from './message-mapper';
+import {
+  buildIncomingMessageBase,
+  extractWwebjsMediaMeta,
+  mapWwebjsMessageType,
+  type WwebjsMediaRawData,
+} from './message-mapper';
 
 /** Default cap on a server-side media download: 50 MiB (overridable via MEDIA_DOWNLOAD_MAX_BYTES). */
 const DEFAULT_MEDIA_MAX_BYTES = 50 * 1024 * 1024;
@@ -1206,15 +1211,40 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     this.ensureReady();
     const chats = await this.client!.getChats();
     // Map the raw whatsapp-web.js chat objects to the library-agnostic ChatSummary
-    // shape so that no library types leak past the engine boundary.
-    return chats.map(chat => ({
-      id: chat.id._serialized,
-      name: chat.name,
-      isGroup: chat.isGroup,
-      unreadCount: chat.unreadCount,
-      timestamp: chat.timestamp,
-      lastMessage: chat.lastMessage?.body || undefined,
-    }));
+    // shape so that no library types leak past the engine boundary. Phantom rows
+    // wwebjs sometimes produces (the `0@c.us` corrupt-chat artifact) and the
+    // status/story pseudo-chat are dropped — they are not real conversations and
+    // would render as junk. Every other chat (incl. @lid) is passed through.
+    const summaries: ChatSummary[] = [];
+    const skipped: Record<string, number> = {};
+    for (const chat of chats) {
+      const id = chat.id?._serialized ?? '';
+      const local = id.split('@')[0];
+      if (!id || !local || /^0+$/.test(local)) {
+        skipped['invalid-id (0@c.us artifact)'] = (skipped['invalid-id (0@c.us artifact)'] || 0) + 1;
+        continue;
+      }
+      if (id === 'status@broadcast') {
+        skipped['status-broadcast'] = (skipped['status-broadcast'] || 0) + 1;
+        continue;
+      }
+      summaries.push({
+        id,
+        name: chat.name,
+        isGroup: chat.isGroup,
+        unreadCount: chat.unreadCount,
+        timestamp: chat.timestamp,
+        lastMessage: chat.lastMessage?.body || undefined,
+        lastMessageType: chat.lastMessage ? mapWwebjsMessageType(chat.lastMessage.type) : undefined,
+        pinned: chat.pinned || undefined,
+        archived: chat.archived || undefined,
+      });
+    }
+    this.logger.debug(
+      `getChats: ${chats.length} fetched from client, ${summaries.length} returned` +
+        (Object.keys(skipped).length ? `, skipped ${JSON.stringify(skipped)}` : ''),
+    );
+    return summaries;
   }
 
   async sendSeen(chatId: string): Promise<boolean> {

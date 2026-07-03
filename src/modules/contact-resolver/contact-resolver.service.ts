@@ -83,12 +83,17 @@ export class ContactResolverService {
    */
   resolve(input: ResolveInput): ResolvedContact {
     const { sessionId, chatId, savedMap } = input;
+    const local = chatId.split('@')[0];
     const savedName = (digits: string): string | null =>
       ContactResolverService.isValidPhone(digits) ? (savedMap.get(sessionId)?.get(digits) ?? null) : null;
+    // An engine "name" that is a raw JID or just the chat id's local part (e.g. the
+    // bare LID number) is not a real name — reject it so it can't leak as identity.
+    const rawEngineName = input.engineName?.trim() || '';
+    const engineName = rawEngineName && !rawEngineName.includes('@') && rawEngineName !== local ? rawEngineName : null;
 
     if (ContactResolverService.isGroup(chatId) || ContactResolverService.isBroadcast(chatId)) {
       // Group/broadcast: only a real engine-supplied name is meaningful; no phone.
-      return { displayName: input.engineName?.trim() || null, phone: null };
+      return { displayName: engineName, phone: null };
     }
 
     if (ContactResolverService.isLid(chatId)) {
@@ -96,16 +101,16 @@ export class ContactResolverService {
       // persisted/engine phone, then a saved name for that phone.
       const phone = ContactResolverService.digits(input.metaPhone || input.enginePhone || '');
       const valid = ContactResolverService.isValidPhone(phone);
-      const name = savedName(phone) ?? input.engineName?.trim() ?? null;
+      const name = savedName(phone) ?? engineName;
       return { displayName: name ?? (valid ? phone : null), phone: valid ? phone : null };
     }
 
     // Direct chat (@c.us / @s.whatsapp.net): the local part is the phone number.
-    const phone = ContactResolverService.digits(chatId.split('@')[0]);
+    const phone = ContactResolverService.digits(local);
     if (!ContactResolverService.isValidPhone(phone)) {
-      return { displayName: input.engineName?.trim() || null, phone: null };
+      return { displayName: engineName, phone: null };
     }
-    const name = savedName(phone) ?? input.engineName?.trim() ?? null;
+    const name = savedName(phone) ?? engineName;
     return { displayName: name ?? phone, phone };
   }
 }

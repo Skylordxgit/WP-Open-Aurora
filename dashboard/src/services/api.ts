@@ -165,6 +165,10 @@ export interface Chat {
   unreadCount: number;
   timestamp: number;
   lastMessage?: string;
+  /** Neutral type of the last message — used for "Photo"/"Voice message" previews when body is empty. */
+  lastMessageType?: string;
+  pinned?: boolean;
+  archived?: boolean;
   /** Backend-resolved contact name (saved name or phone), when available. */
   displayName?: string | null;
   /** Backend-resolved phone digits, or null when unknown (e.g. unresolved @lid). */

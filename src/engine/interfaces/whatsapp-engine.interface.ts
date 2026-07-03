@@ -284,6 +284,14 @@ export interface ChatSummary {
   timestamp: number;
   lastMessage?: string;
   /**
+   * Neutral type of the last message ('text' | 'image' | 'video' | 'voice' | …).
+   * Lets the UI render a "Photo"/"Voice message" preview when the body is empty
+   * (media messages have no text body).
+   */
+  lastMessageType?: string;
+  pinned?: boolean;
+  archived?: boolean;
+  /**
    * Resolved, human-facing contact name (saved name or phone). Optional: only
    * populated where contact resolution runs (e.g. the stored-message fallback);
    * the live engine path leaves it undefined and the UI resolves from `name`.

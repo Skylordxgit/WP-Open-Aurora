@@ -12,6 +12,23 @@ interface LastMessage {
   key: WAMessageKey;
   timestamp: number;
   text: string;
+  /** Neutral message type ('text' | 'image' | 'voice' | …) for empty-body previews. */
+  type: string;
+}
+
+/** Map a Baileys message content shape to the neutral message type used for previews. */
+function neutralTypeOf(msg: WAMessage): string {
+  const m = msg.message;
+  if (!m) return 'text';
+  if (m.imageMessage) return 'image';
+  if (m.videoMessage) return 'video';
+  if (m.audioMessage) return m.audioMessage.ptt ? 'voice' : 'audio';
+  if (m.stickerMessage) return 'sticker';
+  if (m.documentMessage || m.documentWithCaptionMessage) return 'document';
+  if (m.locationMessage || m.liveLocationMessage) return 'location';
+  if (m.contactMessage || m.contactsArrayMessage) return 'contact';
+  if (m.protocolMessage?.type === 0) return 'revoked'; // REVOKE
+  return 'text';
 }
 
 /**
@@ -68,7 +85,7 @@ export class BaileysSessionStore {
       return; // keep the newest
     }
     const text = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? '';
-    this.lastMessages.set(chatId, { key: msg.key, timestamp, text });
+    this.lastMessages.set(chatId, { key: msg.key, timestamp, text, type: neutralTypeOf(msg) });
   }
 
   listContacts(): Contact[] {
@@ -81,7 +98,14 @@ export class BaileysSessionStore {
   }
 
   listChats(): ChatSummary[] {
-    return [...this.chats.values()].map(c => this.toNeutralChat(c));
+    // Drop the status/story pseudo-chat and phantom all-zero ids — not real
+    // conversations. Everything else (incl. @lid chats) is passed through.
+    return [...this.chats.values()]
+      .filter(c => {
+        const local = (c.id || '').split('@')[0];
+        return c.id && c.id !== 'status@broadcast' && local && !/^0+$/.test(local);
+      })
+      .map(c => this.toNeutralChat(c));
   }
 
   lastMessage(chatId: string): { key: WAMessageKey; timestamp: number } | null {
@@ -123,14 +147,18 @@ export class BaileysSessionStore {
 
   private toNeutralChat(c: Chat): ChatSummary {
     const last = this.lastMessages.get(c.id);
-    return {
+    const summary: ChatSummary = {
       id: c.id,
       name: c.name ?? this.userPart(c.id),
       isGroup: c.id.endsWith('@g.us'),
       unreadCount: c.unreadCount ?? 0,
       timestamp: last?.timestamp ?? this.toUnixSeconds(c.conversationTimestamp),
-      lastMessage: last?.text,
+      lastMessage: last?.text || undefined,
     };
+    if (last?.type) summary.lastMessageType = last.type;
+    if (c.pinned) summary.pinned = true;
+    if (c.archived != null) summary.archived = c.archived;
+    return summary;
   }
 
   private userPart(jid: string): string {

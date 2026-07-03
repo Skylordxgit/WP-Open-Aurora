@@ -195,6 +195,25 @@ export const formatContactDisplay = (name: string | null | undefined, id: string
   return formatPhoneDigits(local) || UNKNOWN_CONTACT_LABEL;
 };
 
+// WhatsApp-Web-style preview text for a message with an empty body, from its
+// neutral type. Returns '' for text/unknown so callers fall through to their
+// own "no message" placeholder.
+export const MESSAGE_TYPE_PREVIEWS: Record<string, string> = {
+  image: '📷 Photo',
+  video: '🎥 Video',
+  audio: '🎵 Audio',
+  voice: '🎤 Voice message',
+  ptt: '🎤 Voice message',
+  sticker: '💟 Sticker',
+  document: '📄 Document',
+  location: '📍 Location',
+  contact: '👤 Contact',
+  revoked: 'This message was deleted',
+};
+
+export const messagePreviewFallback = (type?: string): string =>
+  (type && MESSAGE_TYPE_PREVIEWS[type]) || '';
+
 export const formatTime = (timestamp?: number) => {
   if (!timestamp) return '';
   return new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
