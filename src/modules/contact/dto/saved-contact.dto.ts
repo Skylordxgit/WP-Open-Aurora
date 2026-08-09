@@ -12,7 +12,11 @@ export class SavedContactItemDto {
   @IsString()
   number: string;
 
-  @ApiPropertyOptional({ description: 'Where this contact came from', enum: ['imported', 'session'], default: 'imported' })
+  @ApiPropertyOptional({
+    description: 'Where this contact came from',
+    enum: ['imported', 'session'],
+    default: 'imported',
+  })
   @IsOptional()
   @IsIn(['imported', 'session'])
   source?: 'imported' | 'session';

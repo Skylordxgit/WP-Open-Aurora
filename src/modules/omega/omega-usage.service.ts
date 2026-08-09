@@ -87,7 +87,11 @@ export class OmegaUsageService {
       const omegaSession = sessionsByOpenwaId.get(message.sessionId);
       if (!omegaSession?.clientId) continue;
 
-      const entry = perClientMap.get(omegaSession.clientId) ?? { today: 0, month: 0, bySession: new Map<string, number>() };
+      const entry = perClientMap.get(omegaSession.clientId) ?? {
+        today: 0,
+        month: 0,
+        bySession: new Map<string, number>(),
+      };
       if (createdAt >= dayStart) {
         entry.today += 1;
       }

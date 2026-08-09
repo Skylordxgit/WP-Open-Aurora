@@ -38,15 +38,14 @@ const ApiKeys = lazy(() => import('./pages/ApiKeys').then(m => ({ default: m.Api
 const Contacts = lazy(() => import('./pages/Contacts').then(m => ({ default: m.Contacts })));
 const BulkMessaging = lazy(() => import('./pages/BulkMessaging').then(m => ({ default: m.BulkMessaging })));
 const MessageTester = lazy(() => import('./pages/MessageTester').then(m => ({ default: m.MessageTester })));
+const Branding = lazy(() => import('./pages/Branding').then(m => ({ default: m.Branding })));
 const Infrastructure = lazy(() => import('./pages/Infrastructure').then(m => ({ default: m.Infrastructure })));
 const Plugins = lazy(() => import('./pages/Plugins'));
 const OmegaClients = lazy(() => import('./omega/pages/OmegaClients').then(m => ({ default: m.OmegaClients })));
 const OmegaClientForm = lazy(() => import('./omega/pages/OmegaClientForm').then(m => ({ default: m.OmegaClientForm })));
 const OmegaClientDetails = lazy(() => import('./omega/pages/OmegaClientDetails').then(m => ({ default: m.OmegaClientDetails })));
-const OmegaPlans = lazy(() => import('./omega/pages/OmegaPlans').then(m => ({ default: m.OmegaPlans })));
 const OmegaStaff = lazy(() => import('./omega/pages/OmegaStaff').then(m => ({ default: m.OmegaStaff })));
-const OmegaUsage = lazy(() => import('./omega/pages/OmegaUsage').then(m => ({ default: m.OmegaUsage })));
-const OmegaBilling = lazy(() => import('./omega/pages/OmegaBilling').then(m => ({ default: m.OmegaBilling })));
+const OmegaTeams = lazy(() => import('./omega/pages/OmegaTeams').then(m => ({ default: m.OmegaTeams })));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -139,13 +138,12 @@ function AppContent() {
             {role === 'admin' && <Route path="clients/new" element={<OmegaClientForm />} />}
             {role === 'admin' && <Route path="clients/:id" element={<OmegaClientDetails />} />}
             {role === 'admin' && <Route path="clients/:id/edit" element={<OmegaClientForm />} />}
-            {role === 'admin' && <Route path="plans" element={<OmegaPlans />} />}
             {role === 'admin' && <Route path="users" element={<OmegaStaff />} />}
-            {role === 'admin' && <Route path="usage" element={<OmegaUsage />} />}
-            {role === 'admin' && <Route path="billing" element={<OmegaBilling />} />}
+            {role === 'admin' && <Route path="teams" element={<OmegaTeams />} />}
             <Route path="bulk-messaging" element={<BulkMessaging />} />
             <Route path="logs" element={<Logs />} />
             <Route path="message-tester" element={<MessageTester />} />
+            {role === 'admin' && <Route path="branding" element={<Branding />} />}
             <Route path="infrastructure" element={<Infrastructure />} />
             {role === 'admin' && <Route path="plugins" element={<Plugins />} />}
             <Route path="*" element={<Navigate to="/" replace />} />

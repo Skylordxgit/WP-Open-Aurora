@@ -2,12 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  BarChart3,
   LayoutDashboard,
   Smartphone,
   MessageSquare,
   Building2,
-  CreditCard,
   Webhook,
   Key,
   FileText,
@@ -16,8 +14,8 @@ import {
   Megaphone,
   Send,
   Server,
+  Palette,
   Puzzle,
-  Package2,
   Sun,
   Moon,
   Monitor,
@@ -29,6 +27,7 @@ import {
   Users2,
 } from 'lucide-react';
 import { useTheme } from '../hooks/useTheme';
+import { useBranding } from '../hooks/useBranding';
 import { type UserRole } from '../hooks/useRole';
 import { languageOptions, resolveSupportedLanguage, rtlLanguages, type SupportedLanguage } from '../i18n';
 import './Layout.css';
@@ -48,11 +47,10 @@ const allNavItems = [
   { to: '/api-keys', icon: Key, key: 'apiKeys' as const, label: 'API Keys', adminOnly: true },
   { to: '/clients', icon: Building2, key: 'clients' as const, label: 'Clients', adminOnly: true },
   { to: '/users', icon: Users2, key: 'users' as const, label: 'Users', adminOnly: true },
-  { to: '/plans', icon: Package2, key: 'plansPricing' as const, label: 'Plans / Pricing', adminOnly: true },
-  { to: '/usage', icon: BarChart3, key: 'usageLimits' as const, label: 'Usage / Limits', adminOnly: true },
-  { to: '/billing', icon: CreditCard, key: 'billing' as const, label: 'Billing', adminOnly: true },
+  { to: '/teams', icon: Users2, key: 'teams' as const, label: 'Teams', adminOnly: true },
   { to: '/bulk-messaging', icon: Megaphone, key: 'bulkMessaging' as const, label: 'Bulk Messaging', adminOnly: false },
   { to: '/message-tester', icon: Send, key: 'messageTester' as const, label: 'Message Tester', adminOnly: false },
+  { to: '/branding', icon: Palette, key: 'branding' as const, label: 'Branding', adminOnly: true },
   // Backend /infra/* is ADMIN-only; hide the nav item from non-admins (UX + defense-in-depth).
   { to: '/infrastructure', icon: Server, key: 'infrastructure' as const, label: 'Infrastructure', adminOnly: true },
   { to: '/plugins', icon: Puzzle, key: 'plugins' as const, label: 'Plugins', adminOnly: true },
@@ -64,6 +62,7 @@ const themeIcons = { light: Sun, dark: Moon, system: Monitor };
 export function Layout({ onLogout, userRole }: LayoutProps) {
   const { t, i18n } = useTranslation();
   const { theme, toggleTheme } = useTheme();
+  const branding = useBranding();
   const ThemeIcon = themeIcons[theme];
   const themeLabel = t(`theme.${theme}`);
 
@@ -135,8 +134,8 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
             {isMobileOpen ? <X size={24} /> : <Menu size={24} />}
           </button>
           <div className="mobile-brand">
-            <img src="/openwa_logo.webp" alt="OpenWA" className="sidebar-logo" />
-            <span className="brand-name">{t('common.appName')}</span>
+            <img src={branding.logoSrc} alt={branding.appName} className="sidebar-logo" />
+            <span className="brand-name">{branding.appName}</span>
           </div>
           <div style={{ width: 40 }} />
         </header>
@@ -148,11 +147,11 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
         className={`sidebar ${isCollapsed ? 'collapsed' : ''} ${isMobile ? 'mobile' : ''} ${isMobileOpen ? 'open' : ''}`}
       >
         <div className="sidebar-header">
-          <img src="/openwa_logo.webp" alt="OpenWA" className="sidebar-logo" />
+          <img src={branding.logoSrc} alt={branding.appName} className="sidebar-logo" />
           {!isCollapsed && (
             <div className="sidebar-brand">
-              <span className="brand-name">{t('common.appName')}</span>
-              <span className="brand-subtitle">{t('common.appSubtitle')}</span>
+              <span className="brand-name">{branding.appName}</span>
+              <span className="brand-subtitle">{branding.appSubtitle}</span>
             </div>
           )}
         </div>

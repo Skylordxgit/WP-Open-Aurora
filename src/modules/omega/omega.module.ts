@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { MessageModule } from '../message/message.module';
 import { Message } from '../message/entities/message.entity';
 import { Session } from '../session/entities/session.entity';
 import { SessionModule } from '../session/session.module';
@@ -28,6 +29,7 @@ import { OmegaUsageService } from './omega-usage.service';
 
 @Module({
   imports: [
+    MessageModule,
     SessionModule,
     TypeOrmModule.forFeature(
       [

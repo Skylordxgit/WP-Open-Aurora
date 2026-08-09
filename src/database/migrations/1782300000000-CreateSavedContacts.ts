@@ -18,7 +18,7 @@ export class CreateSavedContacts1782300000000 implements MigrationInterface {
           `"source" varchar(20) NOT NULL DEFAULT 'imported', ` +
           `"createdAt" timestamp NOT NULL DEFAULT NOW(), ` +
           `"updatedAt" timestamp NOT NULL DEFAULT NOW(), ` +
-          `CONSTRAINT "FK_saved_contacts_sessionId" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE NO ACTION)` ,
+          `CONSTRAINT "FK_saved_contacts_sessionId" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE NO ACTION)`,
       );
     } else {
       await queryRunner.query(
@@ -30,12 +30,14 @@ export class CreateSavedContacts1782300000000 implements MigrationInterface {
           `"source" varchar(20) NOT NULL DEFAULT 'imported', ` +
           `"createdAt" datetime NOT NULL DEFAULT (datetime('now')), ` +
           `"updatedAt" datetime NOT NULL DEFAULT (datetime('now')), ` +
-          `CONSTRAINT "FK_saved_contacts_sessionId" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE NO ACTION)` ,
+          `CONSTRAINT "FK_saved_contacts_sessionId" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE NO ACTION)`,
       );
     }
 
     await queryRunner.query(`CREATE INDEX "IDX_saved_contacts_sessionId" ON "saved_contacts" ("sessionId")`);
-    await queryRunner.query(`CREATE INDEX "IDX_saved_contacts_sessionId_number" ON "saved_contacts" ("sessionId", "number")`);
+    await queryRunner.query(
+      `CREATE INDEX "IDX_saved_contacts_sessionId_number" ON "saved_contacts" ("sessionId", "number")`,
+    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {

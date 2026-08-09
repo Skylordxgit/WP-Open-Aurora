@@ -12,6 +12,9 @@ import {
   Globe,
   Webhook,
   Gauge,
+  Palette,
+  MonitorSmartphone,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { infraApi, API_BASE_URL } from '../services/api';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
@@ -482,6 +485,57 @@ export function Infrastructure() {
                     onChange={e => updateRateLimitConfig('max', parseInt(e.target.value) || 100)}
                   />
                 </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="infra-card">
+          <div className="card-header">
+            <div className="header-left">
+              <Palette size={20} />
+              <h2>Branding</h2>
+            </div>
+            <span className="status-indicator connected">● Active</span>
+          </div>
+
+          <div className="branding-panel">
+            <div className="branding-preview">
+              <img src="/openwa_logo.png" alt="Current branding logo" className="branding-logo-preview" />
+              <div className="branding-preview-copy">
+                <h3>Current Dashboard Identity</h3>
+                <p>
+                  The dashboard now uses your local PNG logo for the sidebar, login screen, and browser tab icon.
+                </p>
+              </div>
+            </div>
+
+            <div className="branding-grid">
+              <div className="branding-item">
+                <div className="branding-item-header">
+                  <MonitorSmartphone size={16} />
+                  <span>Live app logo</span>
+                </div>
+                <code>/openwa_logo.png</code>
+                <p>Used in the main sidebar and login screen.</p>
+              </div>
+
+              <div className="branding-item">
+                <div className="branding-item-header">
+                  <ImageIcon size={16} />
+                  <span>Browser tab icon</span>
+                </div>
+                <code>/openwa_logo.png</code>
+                <p>Used as the local favicon in the dashboard shell.</p>
+              </div>
+
+              <div className="branding-item">
+                <div className="branding-item-header">
+                  <ImageIcon size={16} />
+                  <span>Source asset</span>
+                </div>
+                <code>docs/logo/openwa_logo.png</code>
+                <p>Matches the branding asset currently stored in the repo docs folder.</p>
               </div>
             </div>
           </div>

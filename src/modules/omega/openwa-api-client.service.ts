@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SessionService } from '../session/session.service';
-import { Session, SessionStatus } from '../session/entities/session.entity';
+import { Session } from '../session/entities/session.entity';
 
 export interface OpenwaSessionSnapshot {
   openwaSessionId: string;
@@ -78,25 +78,18 @@ export class OpenwaApiClientService {
   }
 
   private mapStatus(status: string): OpenwaSessionSnapshot['status'] {
-    switch (status) {
-      case SessionStatus.READY:
+    switch (status.toLowerCase()) {
       case 'ready':
         return 'connected';
-      case SessionStatus.INITIALIZING:
-      case SessionStatus.AUTHENTICATING:
       case 'initializing':
       case 'authenticating':
       case 'connecting':
         return 'starting';
-      case SessionStatus.QR_READY:
       case 'qr_ready':
         return 'qr_required';
-      case SessionStatus.FAILED:
       case 'failed':
         return 'needs_reconnect';
-      case SessionStatus.CREATED:
       case 'created':
-      case SessionStatus.DISCONNECTED:
       case 'disconnected':
       default:
         return 'disconnected';

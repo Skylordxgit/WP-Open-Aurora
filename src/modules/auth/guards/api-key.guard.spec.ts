@@ -131,6 +131,7 @@ describe('ApiKeyGuard', () => {
   it('should reject when role permission is insufficient', async () => {
     reflector.getAllAndOverride
       .mockReturnValueOnce(false) // not public
+      .mockReturnValueOnce(undefined) // skipApiKey = falsey
       .mockReturnValueOnce(ApiKeyRole.ADMIN); // required role = ADMIN
 
     const apiKey = createMockApiKey({ role: ApiKeyRole.VIEWER });

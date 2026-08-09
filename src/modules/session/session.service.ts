@@ -890,7 +890,10 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       return await Promise.race([
         engine.getChats(),
         new Promise<ChatSummary[]>((_, reject) => {
-          setTimeout(() => reject(new Error('Timed out waiting for WhatsApp chat list')), SessionService.CHAT_FETCH_TIMEOUT_MS);
+          setTimeout(
+            () => reject(new Error('Timed out waiting for WhatsApp chat list')),
+            SessionService.CHAT_FETCH_TIMEOUT_MS,
+          );
         }),
       ]);
     } catch (error) {

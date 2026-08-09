@@ -6,9 +6,7 @@ import { omegaApi, type OmegaClient } from '../api';
 type ClientFormState = Pick<
   OmegaClient,
   'companyName' | 'ownerName' | 'email' | 'phone' | 'status' | 'monthlyMessageLimit' | 'whatsappAccountLimit'
-> & {
-  planId: string;
-};
+>;
 
 const initialState: ClientFormState = {
   companyName: '',
@@ -16,7 +14,6 @@ const initialState: ClientFormState = {
   email: '',
   phone: '',
   status: 'active',
-  planId: '',
   monthlyMessageLimit: 0,
   whatsappAccountLimit: 1,
 };
@@ -28,7 +25,6 @@ export function OmegaClientForm() {
   const queryClient = useQueryClient();
   const [form, setForm] = useState<ClientFormState>(initialState);
 
-  const { data: plans = [] } = useQuery({ queryKey: ['omega-plans'], queryFn: omegaApi.plans });
   const { data: client } = useQuery({
     queryKey: ['omega-client', id],
     queryFn: () => omegaApi.client(id!),
@@ -43,7 +39,6 @@ export function OmegaClientForm() {
       email: client.email,
       phone: client.phone,
       status: client.status,
-      planId: client.planId ?? '',
       monthlyMessageLimit: client.monthlyMessageLimit,
       whatsappAccountLimit: client.whatsappAccountLimit,
     });
@@ -52,8 +47,8 @@ export function OmegaClientForm() {
   const mutation = useMutation({
     mutationFn: async () =>
       isEdit
-        ? omegaApi.updateClient(id!, { ...form, planId: form.planId || null })
-        : omegaApi.createClient({ ...form, planId: form.planId || undefined }),
+        ? omegaApi.updateClient(id!, form)
+        : omegaApi.createClient(form),
     onSuccess: result => {
       void queryClient.invalidateQueries({ queryKey: ['omega-clients'] });
       void queryClient.invalidateQueries({ queryKey: ['omega-dashboard'] });
@@ -66,7 +61,7 @@ export function OmegaClientForm() {
       <div className="omega-page-actions">
         <div>
           <h2>{isEdit ? 'Edit Client' : 'Add Client'}</h2>
-          <p>Configure company ownership, subscription limits, and current SaaS status.</p>
+          <p>Configure company ownership, usage limits, and current workspace status.</p>
         </div>
         <Link className="omega-ghost-button" to="/clients">
           Back to Clients
@@ -104,28 +99,6 @@ export function OmegaClientForm() {
           >
             <option value="active">Active</option>
             <option value="suspended">Suspended</option>
-          </select>
-        </label>
-        <label>
-          <span>Plan</span>
-          <select
-            value={form.planId}
-            onChange={event => {
-              const selected = plans.find(plan => plan.id === event.target.value);
-              setForm({
-                ...form,
-                planId: event.target.value,
-                monthlyMessageLimit: selected?.monthlyMessageLimit ?? form.monthlyMessageLimit,
-                whatsappAccountLimit: selected?.whatsappAccountLimit ?? form.whatsappAccountLimit,
-              });
-            }}
-          >
-            <option value="">Custom / No plan</option>
-            {plans.map(plan => (
-              <option key={plan.id} value={plan.id}>
-                {plan.name}
-              </option>
-            ))}
           </select>
         </label>
         <label>

@@ -16,17 +16,17 @@ export class OmegaAuthService implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    const email = this.configService.get<string>('omega.defaultAdminEmail', 'admin@omega.local');
+    const email = this.configService.get<string>('omega.defaultAdminEmail', 'admin@aurorawa.local');
     const password = this.configService.get<string>('omega.defaultAdminPassword', 'ChangeMe123!');
-    const supportEmail = this.configService.get<string>('omega.defaultSupportEmail', 'support@omega.local');
+    const supportEmail = this.configService.get<string>('omega.defaultSupportEmail', 'support@aurorawa.local');
     await this.ensureDefaultUser({
-      fullName: 'Omega Super Admin',
+      fullName: 'Aurora Super Admin',
       email,
       password,
       role: OmegaUserRole.SUPER_ADMIN,
     });
     await this.ensureDefaultUser({
-      fullName: 'Omega Support',
+      fullName: 'Aurora Support',
       email: supportEmail,
       password,
       role: OmegaUserRole.SUPPORT_ADMIN,
@@ -36,11 +36,11 @@ export class OmegaAuthService implements OnModuleInit {
   async login(email: string, password: string): Promise<{ token: string; user: OmegaUser; expiresAt: Date }> {
     const user = await this.userRepository.findOne({ where: { email: email.toLowerCase() } });
     if (!user || !this.verifyPassword(password, user.passwordHash)) {
-      throw new UnauthorizedException('Invalid Omega admin credentials');
+      throw new UnauthorizedException('Invalid Aurora credentials');
     }
 
-    if (user.status === OmegaUserStatus.SUSPENDED) {
-      throw new UnauthorizedException('This Omega user has been suspended');
+    if (user.status !== OmegaUserStatus.ACTIVE) {
+      throw new UnauthorizedException('This Aurora user is inactive');
     }
 
     const token = randomBytes(48).toString('hex');
@@ -65,12 +65,12 @@ export class OmegaAuthService implements OnModuleInit {
     const session = await this.sessionRepository.findOne({ where: { tokenHash } });
 
     if (!session || session.expiresAt < new Date()) {
-      throw new UnauthorizedException('Omega admin session has expired');
+      throw new UnauthorizedException('Aurora session has expired');
     }
 
     const user = await this.userRepository.findOne({ where: { id: session.userId } });
-    if (!user || user.status === OmegaUserStatus.SUSPENDED) {
-      throw new UnauthorizedException('Omega admin user is unavailable');
+    if (!user || user.status !== OmegaUserStatus.ACTIVE) {
+      throw new UnauthorizedException('Aurora user is unavailable');
     }
 
     return { user, session };

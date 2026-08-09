@@ -285,7 +285,7 @@
 }
 
 .omega-table-head-clients {
-  grid-template-columns: 1.5fr 1fr 1fr 0.9fr 0.8fr 0.8fr;
+  grid-template-columns: 1.7fr 1fr 0.9fr 0.8fr 0.8fr;
 }
 
 .omega-table-head-sessions {
@@ -451,13 +451,255 @@
   margin: 0;
 }
 
+.omega-user-management {
+  display: grid;
+  gap: 1rem;
+}
+
+.omega-user-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.omega-user-stat-pill,
+.omega-filter-pill {
+  min-height: 44px;
+  padding: 0.7rem 1rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-light);
+  color: var(--text-primary);
+}
+
+.omega-user-stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.omega-user-stat-pill strong {
+  font-size: 1rem;
+}
+
+.omega-filter-pill {
+  cursor: pointer;
+  font: inherit;
+}
+
+.omega-filter-pill.active {
+  background: var(--sidebar-bg);
+  color: white;
+  border-color: var(--sidebar-bg);
+}
+
+.omega-user-toolbar,
+.omega-team-toolbar {
+  display: grid;
+  grid-template-columns: auto 220px minmax(240px, 1fr);
+  gap: 0.85rem;
+  align-items: center;
+}
+
+.omega-user-toolbar select,
+.omega-user-toolbar input,
+.omega-team-select select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.85rem 0.95rem;
+  background: var(--bg-white);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.omega-team-select {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.omega-user-table {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  overflow: hidden;
+  background: var(--bg-white);
+}
+
+.omega-user-table-head,
+.omega-user-row {
+  display: grid;
+  grid-template-columns: minmax(240px, 2.1fr) minmax(110px, 0.9fr) minmax(110px, 0.85fr) minmax(140px, 1fr) minmax(150px, 1.1fr) minmax(110px, 0.8fr);
+  gap: 1rem;
+  align-items: center;
+}
+
+.omega-user-table-head {
+  padding: 0.95rem 1.15rem;
+  background: var(--bg-light);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.omega-user-row {
+  padding: 1.05rem 1.15rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.omega-user-row:last-child {
+  border-bottom: 0;
+}
+
+.omega-user-cell {
+  min-width: 0;
+}
+
+.omega-user-main strong {
+  margin-bottom: 0.2rem;
+}
+
+.omega-user-main p {
+  margin: 0.15rem 0;
+}
+
+.omega-user-role {
+  font-weight: 600;
+}
+
+.omega-user-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.omega-user-modal {
+  width: min(760px, 100%);
+}
+
+.omega-team-create-card,
+.omega-team-panel,
+.omega-team-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.omega-team-create-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.2fr) auto;
+  gap: 0.85rem;
+  align-items: end;
+}
+
+.omega-team-create-form label,
+.omega-team-create-form input {
+  width: 100%;
+}
+
+.omega-team-create-form label {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.omega-team-create-form input,
+.omega-team-search {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.85rem 0.95rem;
+  background: var(--bg-white);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.omega-team-create-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.omega-team-roster-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 160px;
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.omega-team-roster-list {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 0.85rem;
+  background: var(--bg-light);
+  display: grid;
+  gap: 0.75rem;
+}
+
+.omega-team-roster-items {
+  max-height: 260px;
+  overflow: auto;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.omega-team-user-row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 0.8rem;
+  align-items: start;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-white);
+}
+
+.omega-team-user-row p {
+  margin: 0.2rem 0 0;
+}
+
+.omega-team-roster-actions {
+  display: flex;
+}
+
+.omega-team-save-button {
+  width: 100%;
+  min-height: 100%;
+}
+
+.omega-team-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.omega-team-chip {
+  border: 1px solid var(--border);
+  background: var(--bg-light);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 0.6rem 0.9rem;
+  font: inherit;
+  cursor: pointer;
+}
+
 @media (max-width: 1180px) {
   .omega-grid-stats,
   .omega-grid-two,
   .omega-plan-grid,
   .omega-login-card,
-  .omega-form-grid {
+  .omega-form-grid,
+  .omega-user-toolbar,
+  .omega-team-toolbar,
+  .omega-team-create-form,
+  .omega-team-roster-shell {
     grid-template-columns: 1fr;
+  }
+
+  .omega-user-table {
+    overflow-x: auto;
+  }
+
+  .omega-user-table-head,
+  .omega-user-row {
+    min-width: 980px;
   }
 }
 

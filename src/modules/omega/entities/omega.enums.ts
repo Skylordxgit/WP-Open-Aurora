@@ -7,8 +7,7 @@ export enum OmegaUserRole {
 
 export enum OmegaUserStatus {
   ACTIVE = 'active',
-  INVITED = 'invited',
-  SUSPENDED = 'suspended',
+  INACTIVE = 'inactive',
 }
 
 export enum OmegaClientStatus {

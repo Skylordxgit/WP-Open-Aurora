@@ -2,6 +2,8 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException,
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { MessageService } from '../message/message.service';
+import { SessionService } from '../session/session.service';
 import {
   OmegaAuthSession,
   OmegaCampaign,
@@ -45,6 +47,8 @@ export class OmegaAdminService implements OnModuleInit {
     private readonly omegaAuthService: OmegaAuthService,
     private readonly openwaApiClientService: OpenwaApiClientService,
     private readonly omegaUsageService: OmegaUsageService,
+    private readonly messageService: MessageService,
+    private readonly sessionService: SessionService,
     @InjectRepository(OmegaClient, 'main')
     private readonly clientRepository: Repository<OmegaClient>,
     @InjectRepository(OmegaPlan, 'main')
@@ -80,16 +84,16 @@ export class OmegaAdminService implements OnModuleInit {
   }
 
   async getDashboardSummary() {
-    const [clients, plans, sessions, usageOverview, staff, campaigns, contacts, groups] = await Promise.all([
+    const [clients, plans, sessions, staff, campaigns, contacts, groups] = await Promise.all([
       this.clientRepository.find(),
       this.planRepository.find(),
       this.listSessionEntities(),
-      this.omegaUsageService.buildUsageOverview(await this.clientRepository.find(), await this.listSessionEntities()),
       this.userRepository.find(),
       this.campaignRepository.find(),
       this.contactRepository.find(),
       this.contactGroupRepository.find(),
     ]);
+    const usageOverview = await this.omegaUsageService.buildUsageOverview(clients, sessions);
     const clientsById = new Map(clients.map(client => [client.id, client]));
     const topClients = [...usageOverview.perClient]
       .sort((a, b) => b.messagesThisMonth - a.messagesThisMonth)
@@ -101,7 +105,7 @@ export class OmegaAdminService implements OnModuleInit {
       }));
 
     return {
-      brandName: 'Omega WA API',
+      brandName: 'Aurora WA API',
       stats: {
         totalClients: clients.length,
         activeClients: clients.filter(client => client.status === OmegaClientStatus.ACTIVE).length,
@@ -113,9 +117,8 @@ export class OmegaAdminService implements OnModuleInit {
         unassignedSessions: sessions.filter(session => !session.clientId).length,
         messagesThisMonth: usageOverview.totals.messagesThisMonth,
         messagesToday: usageOverview.totals.messagesToday,
-        staffCount: staff.filter(user =>
-          [OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN].includes(user.role),
-        ).length,
+        staffCount: staff.filter(user => [OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN].includes(user.role))
+          .length,
         contactCount: contacts.length,
         contactGroupCount: groups.length,
         campaigns: campaigns.length,
@@ -130,21 +133,21 @@ export class OmegaAdminService implements OnModuleInit {
           openwaSessionId: session.openwaSessionId,
           openwaSessionName: session.openwaSessionName,
           phoneNumber: session.phoneNumber,
-          companyName: session.clientId ? clientsById.get(session.clientId)?.companyName ?? 'Unknown client' : null,
+          companyName: session.clientId ? (clientsById.get(session.clientId)?.companyName ?? 'Unknown client') : null,
           lastSeenAt: session.lastSeenAt,
         })),
     };
   }
 
   async listClients() {
-    const [clients, plans, sessions, subscriptions, usageOverview, users] = await Promise.all([
+    const [clients, plans, sessions, subscriptions, users] = await Promise.all([
       this.clientRepository.find({ order: { createdAt: 'DESC' } }),
       this.planRepository.find(),
       this.listSessionEntities(),
       this.subscriptionRepository.find(),
-      this.omegaUsageService.buildUsageOverview(await this.clientRepository.find(), await this.listSessionEntities()),
       this.userRepository.find(),
     ]);
+    const usageOverview = await this.omegaUsageService.buildUsageOverview(clients, sessions);
 
     return clients.map(client => {
       const plan = plans.find(item => item.id === client.planId) ?? null;
@@ -249,7 +252,8 @@ export class OmegaAdminService implements OnModuleInit {
 
     return plans.map(plan => ({
       ...plan,
-      activeClients: clients.filter(client => client.planId === plan.id && client.status === OmegaClientStatus.ACTIVE).length,
+      activeClients: clients.filter(client => client.planId === plan.id && client.status === OmegaClientStatus.ACTIVE)
+        .length,
     }));
   }
 
@@ -295,7 +299,7 @@ export class OmegaAdminService implements OnModuleInit {
 
     return sessions.map(session => ({
       ...session,
-      companyName: session.clientId ? clientsById.get(session.clientId)?.companyName ?? null : null,
+      companyName: session.clientId ? (clientsById.get(session.clientId)?.companyName ?? null) : null,
     }));
   }
 
@@ -361,7 +365,7 @@ export class OmegaAdminService implements OnModuleInit {
 
     return users.map(user => ({
       ...user,
-      companyName: user.clientId ? clientsById.get(user.clientId) ?? null : null,
+      companyName: user.clientId ? (clientsById.get(user.clientId) ?? null) : null,
     }));
   }
 
@@ -407,13 +411,87 @@ export class OmegaAdminService implements OnModuleInit {
     return user;
   }
 
+  async getClientCompanyName(clientId?: string | null) {
+    if (!clientId) {
+      return null;
+    }
+
+    const client = await this.clientRepository.findOne({ where: { id: clientId } });
+    return client?.companyName ?? null;
+  }
+
+  async getWorkspaceForUser(user: OmegaUser) {
+    const companyName = await this.getClientCompanyName(user.clientId);
+
+    if (!user.clientId) {
+      return {
+        companyName,
+        sessions: [],
+        chats: [],
+        stats: {
+          assignedSessions: 0,
+          activeSessions: 0,
+          totalChats: 0,
+        },
+      };
+    }
+
+    const sessions = await this.getClientSessions(user.clientId);
+    const chatBuckets = await Promise.all(
+      sessions.map(async session => {
+        try {
+          const chats = await this.sessionService.getChats(session.openwaSessionId);
+          return chats.map(chat => ({
+            ...chat,
+            sessionId: session.id,
+            sessionName: session.openwaSessionName ?? session.openwaSessionId,
+            phoneNumber: session.phoneNumber ?? null,
+          }));
+        } catch {
+          return [];
+        }
+      }),
+    );
+
+    const chats = chatBuckets
+      .flat()
+      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+      .slice(0, 20);
+
+    return {
+      companyName,
+      sessions,
+      chats,
+      stats: {
+        assignedSessions: sessions.length,
+        activeSessions: sessions.filter(session => session.status === OmegaSessionStatus.CONNECTED).length,
+        totalChats: chats.length,
+      },
+    };
+  }
+
+  async getWorkspaceMessages(user: OmegaUser, workspaceSessionId: string, chatId: string, limit = 100) {
+    const session = await this.getWorkspaceSessionForUser(user, workspaceSessionId);
+    return this.messageService.getMessages(session.openwaSessionId, { chatId, limit });
+  }
+
+  async markWorkspaceChatRead(user: OmegaUser, workspaceSessionId: string, chatId: string) {
+    const session = await this.getWorkspaceSessionForUser(user, workspaceSessionId);
+    return this.sessionService.sendSeen(session.openwaSessionId, chatId);
+  }
+
+  async sendWorkspaceText(user: OmegaUser, workspaceSessionId: string, chatId: string, text: string) {
+    const session = await this.getWorkspaceSessionForUser(user, workspaceSessionId);
+    return this.messageService.sendText(session.openwaSessionId, { chatId, text });
+  }
+
   async getUsageOverview() {
-    const [clients, sessions, usage, manualUsage] = await Promise.all([
+    const [clients, sessions, manualUsage] = await Promise.all([
       this.clientRepository.find(),
       this.listSessionEntities(),
-      this.omegaUsageService.buildUsageOverview(await this.clientRepository.find(), await this.listSessionEntities()),
       this.usageRepository.find({ order: { createdAt: 'DESC' } }),
     ]);
+    const usage = await this.omegaUsageService.buildUsageOverview(clients, sessions);
 
     return {
       currentMonth: usage.currentMonth,
@@ -422,7 +500,9 @@ export class OmegaAdminService implements OnModuleInit {
         messagesToday: usage.totals.messagesToday,
         messagesThisMonth: usage.totals.messagesThisMonth,
         reconnections: manualUsage
-          .filter(entry => entry.periodMonth === usage.currentMonth && entry.metricType === OmegaUsageMetricType.RECONNECT)
+          .filter(
+            entry => entry.periodMonth === usage.currentMonth && entry.metricType === OmegaUsageMetricType.RECONNECT,
+          )
           .reduce((sum, entry) => sum + entry.units, 0),
       },
       perClient: usage.perClient.map(client => ({
@@ -449,7 +529,7 @@ export class OmegaAdminService implements OnModuleInit {
     ]);
 
     return {
-      brandName: 'Omega WA API',
+      brandName: 'Aurora WA API',
       architecture: {
         omegaLayer: '/api/omega',
         openwaApiBaseUrl: this.configService.get<string>('omega.openwaApiBaseUrl', '/api'),
@@ -466,8 +546,8 @@ export class OmegaAdminService implements OnModuleInit {
         authSessionTtlHours: this.configService.get<number>('omega.authSessionTtlHours', 12),
       },
       defaultAccounts: {
-        superAdminEmail: this.configService.get<string>('omega.defaultAdminEmail', 'admin@omega.local'),
-        supportAdminEmail: this.configService.get<string>('omega.defaultSupportEmail', 'support@omega.local'),
+        superAdminEmail: this.configService.get<string>('omega.defaultAdminEmail', 'admin@aurorawa.local'),
+        supportAdminEmail: this.configService.get<string>('omega.defaultSupportEmail', 'support@aurorawa.local'),
       },
     };
   }
@@ -519,7 +599,7 @@ export class OmegaAdminService implements OnModuleInit {
     const clientsById = new Map(clients.map(client => [client.id, client]));
     return sessions.map(session => ({
       ...session,
-      companyName: session.clientId ? clientsById.get(session.clientId)?.companyName ?? null : null,
+      companyName: session.clientId ? (clientsById.get(session.clientId)?.companyName ?? null) : null,
     }));
   }
 
@@ -638,7 +718,7 @@ export class OmegaAdminService implements OnModuleInit {
         email: 'admin@bluepeak-realty.example',
         passwordHash: this.omegaAuthService.hashPassword('ChangeMe123!'),
         role: OmegaUserRole.CLIENT_ADMIN,
-        status: OmegaUserStatus.SUSPENDED,
+        status: OmegaUserStatus.INACTIVE,
         clientId: secondClient.id,
       }),
     ]);
@@ -766,7 +846,7 @@ export class OmegaAdminService implements OnModuleInit {
   private async listSessionEntities(filters: { status?: string; clientId?: string } = {}) {
     const sessions = await this.sessionRepository.find({ order: { createdAt: 'DESC' } });
     return sessions.filter(session => {
-      if (filters.status && session.status !== filters.status) return false;
+      if (filters.status && String(session.status) !== filters.status) return false;
       if (filters.clientId && session.clientId !== filters.clientId) return false;
       return true;
     });
@@ -778,6 +858,20 @@ export class OmegaAdminService implements OnModuleInit {
       ...session,
       companyName: client?.companyName ?? null,
     };
+  }
+
+  private async getWorkspaceSessionForUser(user: OmegaUser, workspaceSessionId: string) {
+    const session = await this.sessionRepository.findOne({ where: { id: workspaceSessionId } });
+    if (!session) {
+      throw new NotFoundException('Workspace session not found');
+    }
+
+    const canAccessAnySession = [OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN].includes(user.role);
+    if (!canAccessAnySession && (!user.clientId || session.clientId !== user.clientId)) {
+      throw new ForbiddenException('You do not have access to this workspace session');
+    }
+
+    return session;
   }
 
   private currentMonth(date = new Date()): string {

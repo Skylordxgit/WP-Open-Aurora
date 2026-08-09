@@ -7,7 +7,7 @@ export interface OmegaUser {
   fullName: string;
   email: string;
   role: OmegaRole;
-  status: 'active' | 'invited' | 'suspended';
+  status: 'active' | 'inactive';
   clientId?: string | null;
   companyName?: string | null;
   lastLoginAt?: string | null;
@@ -156,6 +156,65 @@ export interface OmegaClientDetails extends OmegaClient {
   contactGroupsCount: number;
 }
 
+export interface OmegaWorkspaceSession {
+  id: string;
+  openwaSessionId: string;
+  openwaSessionName?: string | null;
+  companyName?: string | null;
+  phoneNumber?: string | null;
+  status: 'connected' | 'disconnected' | 'needs_reconnect' | 'starting' | 'qr_required';
+  assignedToClient: boolean;
+  replacementRequested?: boolean;
+  lastSeenAt?: string | null;
+  lastSyncAt?: string | null;
+  createdAt: string;
+}
+
+export interface OmegaWorkspaceChat {
+  id: string;
+  name: string;
+  isGroup: boolean;
+  unreadCount: number;
+  timestamp: number;
+  lastMessage?: string;
+  sessionId: string;
+  sessionName: string;
+  phoneNumber?: string | null;
+}
+
+export interface OmegaWorkspace {
+  companyName?: string | null;
+  sessions: OmegaWorkspaceSession[];
+  chats: OmegaWorkspaceChat[];
+  stats: {
+    assignedSessions: number;
+    activeSessions: number;
+    totalChats: number;
+  };
+}
+
+export interface OmegaWorkspaceMessages {
+  messages: Array<{
+    id: string;
+    waMessageId?: string;
+    chatId: string;
+    from: string;
+    to: string;
+    body: string;
+    type: string;
+    direction: 'incoming' | 'outgoing';
+    status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+    timestamp?: number;
+    createdAt: string;
+    metadata?: {
+      media?: { mimetype: string; filename?: string; data?: string };
+      quotedMessage?: { id: string; body: string };
+      reactions?: Record<string, string>;
+    };
+  }>;
+  total: number;
+}
+
 export interface OmegaSettings {
   brandName: string;
   architecture: {
@@ -247,8 +306,39 @@ export async function omegaMe() {
   return omegaFetch<OmegaUser>('/auth/me');
 }
 
+export async function omegaWorkspace() {
+  return omegaFetch<OmegaWorkspace>('/auth/workspace');
+}
+
+export async function omegaWorkspaceMessages(sessionId: string, chatId: string, limit = 100) {
+  return omegaFetch<OmegaWorkspaceMessages>(
+    `/auth/workspace/messages/${encodeURIComponent(sessionId)}/${encodeURIComponent(chatId)}?limit=${limit}`,
+  );
+}
+
+export async function omegaWorkspaceMarkRead(sessionId: string, chatId: string) {
+  return omegaFetch<{ success: boolean }>(`/auth/workspace/chats/${encodeURIComponent(sessionId)}/read`, {
+    method: 'POST',
+    body: JSON.stringify({ chatId }),
+  });
+}
+
+export async function omegaWorkspaceSendText(sessionId: string, chatId: string, text: string) {
+  return omegaFetch<{ messageId: string; timestamp: number }>(
+    `/auth/workspace/messages/${encodeURIComponent(sessionId)}/send-text`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ chatId, text }),
+    },
+  );
+}
+
 export const omegaApi = {
   me: omegaMe,
+  workspace: omegaWorkspace,
+  workspaceMessages: omegaWorkspaceMessages,
+  workspaceMarkRead: omegaWorkspaceMarkRead,
+  workspaceSendText: omegaWorkspaceSendText,
   dashboard: () => omegaFetch<OmegaDashboardSummary>('/admin/dashboard'),
   usage: () => omegaFetch<OmegaUsageOverview>('/usage'),
   settings: () => omegaFetch<OmegaSettings>('/admin/settings'),

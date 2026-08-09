@@ -4,8 +4,9 @@ export class EnhanceOmegaSessionsForOpenwaSync1782100000000 implements Migration
   name = 'EnhanceOmegaSessionsForOpenwaSync1782100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    const columns = await queryRunner.query(`PRAGMA table_info("omega_whatsapp_sessions")`);
-    const hasColumn = (name: string) => Array.isArray(columns) && columns.some((column: { name: string }) => column.name === name);
+    const rawColumns: unknown = await queryRunner.query(`PRAGMA table_info("omega_whatsapp_sessions")`);
+    const columns = Array.isArray(rawColumns) ? (rawColumns as Array<{ name?: unknown }>) : [];
+    const hasColumn = (name: string) => columns.some(column => typeof column.name === 'string' && column.name === name);
 
     if (!hasColumn('openwaSessionName')) {
       await queryRunner.query(`ALTER TABLE "omega_whatsapp_sessions" ADD COLUMN "openwaSessionName" varchar(160)`);
@@ -20,8 +21,9 @@ export class EnhanceOmegaSessionsForOpenwaSync1782100000000 implements Migration
     }
   }
 
-  public async down(queryRunner: QueryRunner): Promise<void> {
+  public down(queryRunner: QueryRunner): Promise<void> {
     // SQLite does not support DROP COLUMN in-place across all bundled versions; keep this migration additive-only.
     void queryRunner;
+    return Promise.resolve();
   }
 }

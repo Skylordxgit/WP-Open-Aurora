@@ -28,12 +28,11 @@ export function OmegaClientDetails() {
 
       <section className="omega-grid omega-grid-two">
         <article className="omega-card">
-          <h3>Plan & Limits</h3>
+          <h3>Workspace Limits</h3>
           <dl className="omega-definition-list">
-            <div><dt>Plan</dt><dd>{data!.plan?.name ?? 'Custom'}</dd></div>
             <div><dt>Message Limit</dt><dd>{data!.monthlyMessageLimit.toLocaleString()}</dd></div>
             <div><dt>WhatsApp Limit</dt><dd>{data!.whatsappAccountLimit}</dd></div>
-            <div><dt>Subscription</dt><dd>{data!.subscription?.status ?? 'trial'}</dd></div>
+            <div><dt>Status</dt><dd>{data!.status}</dd></div>
           </dl>
         </article>
         <article className="omega-card">

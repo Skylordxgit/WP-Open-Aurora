@@ -21,36 +21,34 @@ export function OmegaClients() {
       </div>
 
       <section className="omega-card">
-        <div className="omega-table">
-          <div className="omega-table-head omega-table-head-clients">
-            <span>Company</span>
-            <span>Plan</span>
-            <span>Usage</span>
-            <span>Sessions</span>
-            <span>Status</span>
-            <span>Actions</span>
-          </div>
-          {data!.map(client => (
-            <div key={client.id} className="omega-table-row omega-table-head-clients">
-              <div>
-                <strong>{client.companyName}</strong>
-                <p>{client.ownerName}</p>
-              </div>
-              <span>{client.planName ?? 'Custom'}</span>
-              <span>
-                {(client.usageThisMonth ?? 0).toLocaleString()} / {client.monthlyMessageLimit.toLocaleString()}
-              </span>
-              <span>
-                {client.connectedSessions ?? 0} / {client.whatsappAccountLimit}
-              </span>
-              <span className={`omega-badge ${client.status === 'active' ? 'success' : 'danger'}`}>{client.status}</span>
-              <div className="omega-table-actions">
-                <Link to={`/clients/${client.id}`}>Details</Link>
-                <Link to={`/clients/${client.id}/edit`}>Edit</Link>
-              </div>
+          <div className="omega-table">
+            <div className="omega-table-head omega-table-head-clients">
+              <span>Company</span>
+              <span>Usage</span>
+              <span>Sessions</span>
+              <span>Status</span>
+              <span>Actions</span>
             </div>
-          ))}
-        </div>
+            {data!.map(client => (
+              <div key={client.id} className="omega-table-row omega-table-head-clients">
+                <div>
+                  <strong>{client.companyName}</strong>
+                  <p>{client.ownerName}</p>
+                </div>
+                <span>
+                  {(client.usageThisMonth ?? 0).toLocaleString()} / {client.monthlyMessageLimit.toLocaleString()}
+                </span>
+                <span>
+                  {client.connectedSessions ?? 0} / {client.whatsappAccountLimit}
+                </span>
+                <span className={`omega-badge ${client.status === 'active' ? 'success' : 'danger'}`}>{client.status}</span>
+                <div className="omega-table-actions">
+                  <Link to={`/clients/${client.id}`}>Details</Link>
+                  <Link to={`/clients/${client.id}/edit`}>Edit</Link>
+                </div>
+              </div>
+            ))}
+          </div>
       </section>
     </div>
   );
