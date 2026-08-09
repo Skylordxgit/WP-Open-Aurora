@@ -1,0 +1,481 @@
+.omega-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  background: var(--page-bg);
+  color: var(--text-primary);
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+.omega-sidebar {
+  background: var(--sidebar-bg);
+  color: var(--sidebar-text);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  border-right: 1px solid var(--sidebar-border);
+}
+
+.omega-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.omega-brand-mark {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--primary), #18a64e);
+  color: white;
+  font-weight: 700;
+  font-size: 1.15rem;
+}
+
+.omega-brand strong,
+.omega-user-card strong,
+.omega-card h2,
+.omega-card h3,
+.omega-login-card h1,
+.omega-topbar h1,
+.omega-page h2 {
+  display: block;
+}
+
+.omega-brand span,
+.omega-user-card span,
+.omega-helper-text,
+.omega-card p,
+.omega-table-row p,
+.omega-list-item p,
+.omega-login-copy p,
+.omega-topbar p {
+  color: var(--text-muted);
+}
+
+.omega-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.omega-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-radius: 14px;
+  color: var(--sidebar-muted);
+  text-decoration: none;
+  transition: all 160ms ease;
+  border: 1px solid transparent;
+}
+
+.omega-nav-link:hover,
+.omega-nav-link.active {
+  background: var(--sidebar-active);
+  border-color: var(--sidebar-active-border);
+  color: var(--sidebar-text);
+  text-decoration: none;
+}
+
+.omega-sidebar-footer {
+  margin-top: auto;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.omega-user-card {
+  padding: 1rem;
+  border-radius: 16px;
+  background: var(--sidebar-surface);
+}
+
+.omega-main {
+  padding: 1.5rem 1.75rem 2.5rem;
+}
+
+.omega-topbar,
+.omega-page-actions,
+.omega-stack-inline,
+.omega-card-header,
+.omega-list-item,
+.omega-chart-row,
+.omega-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.omega-page {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.omega-eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.74rem;
+  color: var(--primary);
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+
+.omega-status-cluster,
+.omega-page-actions,
+.omega-stack-inline {
+  flex-wrap: wrap;
+}
+
+.omega-grid {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.omega-grid-stats {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.omega-grid-two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.omega-stat-card,
+.omega-card,
+.omega-login-card {
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(12px);
+}
+
+.omega-stat-card {
+  padding: 1.2rem 1.25rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.omega-stat-card span,
+.omega-card p,
+.omega-table-head,
+.omega-definition-list dt,
+.omega-helper-text {
+  color: var(--text-muted);
+}
+
+.omega-stat-card strong {
+  font-size: 1.9rem;
+  line-height: 1;
+}
+
+.omega-card {
+  padding: 1.35rem;
+}
+
+.omega-card h2,
+.omega-card h3,
+.omega-page h2,
+.omega-topbar h1,
+.omega-login-card h1 {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.omega-primary-button,
+.omega-ghost-button,
+.omega-form input,
+.omega-form select,
+.omega-form textarea {
+  border-radius: 14px;
+  font: inherit;
+}
+
+.omega-primary-button,
+.omega-ghost-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.8rem 1.15rem;
+  border: 0;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.omega-primary-button {
+  background: linear-gradient(135deg, var(--primary), #18a64e);
+  color: white;
+  box-shadow: 0 14px 28px rgba(37, 211, 102, 0.2);
+}
+
+.omega-ghost-button {
+  background: var(--primary-soft);
+  color: var(--text-primary);
+  border: 1px solid var(--primary-border);
+}
+
+.omega-logout {
+  width: 100%;
+  color: var(--sidebar-text);
+  background: var(--sidebar-surface);
+}
+
+.omega-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.82rem;
+  text-transform: capitalize;
+}
+
+.omega-badge.success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.omega-badge.warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.omega-badge.neutral {
+  background: var(--primary-soft);
+  color: var(--text-secondary);
+}
+
+.omega-badge.danger {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.omega-table,
+.omega-list,
+.omega-form,
+.omega-plan-grid,
+.omega-chart,
+.omega-definition-list {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.omega-table-head,
+.omega-table-row {
+  display: grid;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.85rem 0;
+}
+
+.omega-table-head {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--border);
+}
+
+.omega-table-row {
+  border-bottom: 1px solid var(--border);
+}
+
+.omega-table-head-clients {
+  grid-template-columns: 1.5fr 1fr 1fr 0.9fr 0.8fr 0.8fr;
+}
+
+.omega-table-head-sessions {
+  grid-template-columns: 1.3fr 0.8fr 0.8fr 1fr 1fr;
+}
+
+.omega-table-head-sessions-phase2 {
+  grid-template-columns: 1.3fr 0.75fr 0.85fr 1fr 1fr 0.9fr;
+}
+
+.omega-table-head-usage-session {
+  grid-template-columns: 1.4fr 1fr 0.8fr;
+}
+
+.omega-table-actions {
+  display: flex;
+  gap: 0.8rem;
+}
+
+.omega-link-button {
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+
+.omega-list-item {
+  padding: 0.85rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.omega-chart-bar-wrap {
+  width: 100%;
+  height: 12px;
+  background: var(--primary-soft);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.omega-chart-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary), #18a64e);
+}
+
+.omega-form label {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.omega-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.omega-form input,
+.omega-form select,
+.omega-form textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  padding: 0.85rem 0.95rem;
+  background: var(--bg-white);
+  color: var(--text-primary);
+}
+
+.omega-form textarea {
+  min-height: 100px;
+  resize: vertical;
+}
+
+.omega-inline-error {
+  padding: 0.85rem 1rem;
+  border-radius: 14px;
+  background: #fff1f2;
+  color: #be123c;
+  border: 1px solid #fecdd3;
+}
+
+.omega-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.48);
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  z-index: 40;
+}
+
+.omega-modal {
+  width: min(860px, 100%);
+  max-height: 90vh;
+  overflow: auto;
+  border-radius: 18px;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  padding: 1.25rem;
+  box-shadow: var(--shadow-lg);
+}
+
+.omega-card-flat {
+  box-shadow: none;
+  background: var(--bg-card);
+}
+
+.omega-modal-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.omega-login-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background:
+    radial-gradient(circle at top left, rgba(37, 211, 102, 0.18), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(16, 185, 129, 0.14), transparent 30%),
+    var(--sidebar-bg);
+}
+
+.omega-login-card {
+  width: min(980px, 100%);
+  padding: 1.6rem;
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  gap: 1.4rem;
+}
+
+.omega-login-copy {
+  padding: 1.8rem;
+  border-radius: 20px;
+  background: var(--sidebar-bg);
+  color: white;
+}
+
+.omega-login-copy p {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.omega-plan-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.omega-plan-card {
+  padding: 1rem;
+  border-radius: 18px;
+  background: linear-gradient(180deg, var(--bg-white), var(--bg-light));
+  border: 1px solid var(--border);
+}
+
+.omega-definition-list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.omega-empty {
+  color: var(--text-muted);
+  margin: 0;
+}
+
+@media (max-width: 1180px) {
+  .omega-grid-stats,
+  .omega-grid-two,
+  .omega-plan-grid,
+  .omega-login-card,
+  .omega-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 920px) {
+  .omega-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .omega-sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .omega-table-head,
+  .omega-table-row,
+  .omega-table-head-clients,
+  .omega-table-head-sessions {
+    grid-template-columns: 1fr;
+  }
+}

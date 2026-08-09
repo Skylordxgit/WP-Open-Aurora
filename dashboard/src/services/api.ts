@@ -1,0 +1,761 @@
+// API Service Layer for OpenWA Dashboard
+// Centralized API client with TypeScript types
+
+// Resolve the API base URL. By default this is the same-origin relative path '/api',
+// correct when the dashboard and API are served from the same origin (the default
+// single-container setup). For a split-origin deployment (dashboard hosted separately
+// from the API), set VITE_API_URL at build time to the API ORIGIN — e.g.
+// `VITE_API_URL=https://gateway.example.com` — and the '/api' prefix is appended here.
+// Previously VITE_API_URL was documented but never read, so the dashboard always called
+// same-origin '/api' and a split deployment failed with "Invalid API Key" (#91).
+// Exported so direct fetches (e.g. auth/validate in Login.tsx / App.tsx) honor VITE_API_URL
+// too — otherwise split-origin deployments break. Empty VITE_API_URL → '/api'.
+export const API_BASE_URL = `${(import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')}/api`;
+
+// =============================================================================
+// Types
+// =============================================================================
+
+export interface Session {
+  id: string;
+  name: string;
+  status: 'created' | 'idle' | 'initializing' | 'connecting' | 'qr_ready' | 'ready' | 'disconnected' | 'failed';
+  phone?: string;
+  pushName?: string;
+  lastActive?: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Human-readable reason for the most recent terminal engine failure (set only when status is 'failed'). */
+  lastError?: string | null;
+}
+
+export interface SessionStats {
+  total: number;
+  active: number;
+  ready: number;
+  disconnected: number;
+  byStatus: Record<string, number>;
+  memoryUsage: { heapUsed: number; heapTotal: number; rss: number };
+}
+
+export interface Webhook {
+  id: string;
+  sessionId: string;
+  url: string;
+  events: string[];
+  active: boolean;
+  secret?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MessageTemplate {
+  id: string;
+  sessionId: string;
+  name: string;
+  body: string;
+  header?: string | null;
+  footer?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TemplatePayload {
+  name: string;
+  body: string;
+  header?: string | null;
+  footer?: string | null;
+}
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  keyPrefix: string;
+  role: 'admin' | 'operator' | 'viewer';
+  allowedIps?: string[];
+  allowedSessions?: string[];
+  isActive: boolean;
+  expiresAt?: string;
+  lastUsedAt?: string;
+  usageCount: number;
+  createdAt: string;
+  apiKey?: string; // Only returned on creation
+}
+
+export interface AuditLog {
+  id: string;
+  action: string;
+  severity: 'info' | 'warn' | 'error';
+  apiKeyId?: string;
+  apiKeyName?: string;
+  sessionId?: string;
+  sessionName?: string;
+  ipAddress?: string;
+  method?: string;
+  path?: string;
+  statusCode?: number;
+  errorMessage?: string;
+  createdAt: string;
+}
+
+export interface MessageResponse {
+  messageId: string;
+  timestamp: number;
+}
+
+export interface BulkMessageContent {
+  text?: string;
+  caption?: string;
+  image?: { url?: string; base64?: string; mimetype?: string };
+  video?: { url?: string; base64?: string; mimetype?: string };
+  audio?: { url?: string; base64?: string; mimetype?: string };
+  document?: { url?: string; base64?: string; mimetype?: string; filename?: string };
+}
+
+export interface BulkMessageItem {
+  chatId: string;
+  type: 'text' | 'image' | 'video' | 'audio' | 'document';
+  content: BulkMessageContent;
+  variables?: Record<string, string>;
+}
+
+export interface BulkMessageOptions {
+  delayBetweenMessages?: number;
+  randomizeDelay?: boolean;
+  stopOnError?: boolean;
+}
+
+export interface BulkMessageBatchResponse {
+  batchId: string;
+  status: string;
+  totalMessages: number;
+  estimatedCompletionTime?: string;
+  statusUrl: string;
+}
+
+export interface BulkMessageBatchStatus {
+  batchId: string;
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | string;
+  progress: {
+    total: number;
+    sent: number;
+    failed: number;
+    pending: number;
+    cancelled: number;
+  };
+  results: Array<{
+    chatId: string;
+    status: string;
+    messageId?: string;
+    sentAt?: string;
+    error?: {
+      code: string;
+      message: string;
+    };
+  }>;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+// Chat summary returned by GET /sessions/:id/chats (mirrors the backend ChatSummary).
+export interface Chat {
+  id: string;
+  name: string;
+  isGroup: boolean;
+  unreadCount: number;
+  timestamp: number;
+  lastMessage?: string;
+}
+
+// Engine-neutral message types (mirrors the backend's IWhatsAppEngine MessageType). The backend
+// normalizes raw engine tokens at the adapter boundary (#265/#270), so persisted rows, the
+// message.received/sent payloads, and the websocket all use these values.
+export const MESSAGE_TYPES = [
+  'text',
+  'image',
+  'video',
+  'audio',
+  'voice',
+  'document',
+  'sticker',
+  'location',
+  'contact',
+  'revoked',
+  'unknown',
+] as const;
+export type MessageType = (typeof MESSAGE_TYPES)[number];
+
+/** Coerce an arbitrary string (e.g. a raw websocket payload field) to a known MessageType. */
+export function asMessageType(value: string | undefined): MessageType {
+  return (MESSAGE_TYPES as readonly string[]).includes(value ?? '') ? (value as MessageType) : 'unknown';
+}
+
+export interface ChatMessage {
+  id: string;
+  waMessageId?: string;
+  chatId: string;
+  from: string;
+  to: string;
+  body: string;
+  type: MessageType;
+  direction: 'incoming' | 'outgoing';
+  status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+  timestamp?: number;
+  createdAt: string;
+  metadata?: {
+    media?: { mimetype: string; filename?: string; data?: string };
+    quotedMessage?: { id: string; body: string };
+    reactions?: Record<string, string>;
+  };
+}
+
+export interface SendMediaPayload {
+  base64?: string;
+  url?: string;
+  mimetype?: string;
+  filename?: string;
+  caption?: string;
+}
+
+export interface HealthStatus {
+  status: 'ok' | 'error';
+  timestamp?: string;
+  details?: {
+    database?: { status: string };
+    redis?: { status: string };
+    queue?: { status: string };
+  };
+}
+
+export interface InfraStatus {
+  database: { connected: boolean; type: string; host: string };
+  redis: { connected: boolean; host: string; port: number };
+  queue: {
+    enabled: boolean;
+    messages: { pending: number; completed: number; failed: number };
+    webhooks: { pending: number; completed: number; failed: number };
+  };
+  storage: { type: 'local' | 's3'; path?: string; bucket?: string };
+  engine: { type: string; headless: boolean };
+}
+
+// Saved infrastructure config (from data/.env.generated) used to hydrate the form.
+// Secrets are never returned — `*Set` flags indicate whether a value is stored.
+export interface SavedConfig {
+  database: {
+    type: 'sqlite' | 'postgres';
+    builtIn: boolean;
+    host: string;
+    port: string;
+    username: string;
+    database: string;
+    poolSize: number;
+    sslEnabled: boolean;
+    sslRejectUnauthorized: boolean;
+    passwordSet: boolean;
+  };
+  redis: { enabled: boolean; builtIn: boolean; host: string; port: string; passwordSet: boolean };
+  queue: { enabled: boolean };
+  storage: {
+    type: 'local' | 's3';
+    builtIn: boolean;
+    localPath: string;
+    s3Bucket: string;
+    s3Region: string;
+    s3Endpoint: string;
+    s3CredentialsSet: boolean;
+  };
+  engine: { headless: boolean; sessionDataPath: string; browserArgs: string };
+}
+
+export interface SaveConfigPayload {
+  database?: {
+    type: 'sqlite' | 'postgres';
+    builtIn?: boolean;
+    host?: string;
+    port?: string;
+    username?: string;
+    password?: string;
+    database?: string;
+    poolSize?: number;
+    sslEnabled?: boolean;
+    sslRejectUnauthorized?: boolean;
+  };
+  redis?: {
+    enabled?: boolean;
+    builtIn?: boolean;
+    host?: string;
+    port?: string;
+    password?: string;
+  };
+  queue?: {
+    enabled?: boolean;
+  };
+  storage?: {
+    type: 'local' | 's3';
+    builtIn?: boolean;
+    localPath?: string;
+    s3Bucket?: string;
+    s3Region?: string;
+    s3AccessKey?: string;
+    s3SecretKey?: string;
+    s3Endpoint?: string;
+  };
+  engine?: {
+    headless?: boolean;
+    sessionDataPath?: string;
+    browserArgs?: string;
+  };
+}
+
+export interface Settings {
+  general: { apiBaseUrl: string; sessionTimeout: number; autoReconnect: boolean; debugMode: boolean };
+  api: { rateLimit: number; rateLimitWindow: number; enableDocs: boolean };
+  notifications: { emailEnabled: boolean; notificationEmail: string; webhookAlerts: boolean };
+}
+
+// =============================================================================
+// API Client
+// =============================================================================
+
+interface RequestOptions extends RequestInit {
+  timeoutMs?: number;
+}
+
+async function request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
+  const url = `${API_BASE_URL}${endpoint}`;
+  const { timeoutMs, ...fetchOptions } = options;
+
+  const apiKey = localStorage.getItem('openwa_api_key') || sessionStorage.getItem('openwa_api_key');
+
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+    ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+    ...fetchOptions.headers,
+  };
+
+  const controller = timeoutMs ? new AbortController() : undefined;
+  const timeoutId = timeoutMs
+    ? setTimeout(() => {
+        controller?.abort();
+      }, timeoutMs)
+    : undefined;
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...fetchOptions,
+      headers,
+      signal: controller?.signal,
+    });
+  } catch (error) {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Request timed out after ${Math.ceil(timeoutMs! / 1000)}s`);
+    }
+    throw error;
+  }
+
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+  }
+
+  if (response.status === 401) {
+    // The stored API key is invalid/expired/revoked — clear it and return to login
+    // so the user isn't stuck on a dashboard that 401s every request.
+    localStorage.removeItem('openwa_api_key');
+    sessionStorage.removeItem('openwa_api_key');
+    if (typeof window !== 'undefined') {
+      window.location.assign('/');
+      // The page is navigating away — halt this request's promise chain so callers neither
+      // throw the generic error below (flashing a toast) nor receive an undefined payload.
+      return new Promise<T>(() => {});
+    }
+  }
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ message: response.statusText }));
+    throw new Error(error.message || `HTTP ${response.status}`);
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  return response.json();
+}
+
+// =============================================================================
+// Session API
+// =============================================================================
+
+export const sessionApi = {
+  list: () => request<Session[]>('/sessions'),
+  get: (id: string) => request<Session>(`/sessions/${id}`),
+  create: (name: string) =>
+    request<Session>('/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+  delete: (id: string) => request<void>(`/sessions/${id}`, { method: 'DELETE' }),
+  start: (id: string) => request<Session>(`/sessions/${id}/start`, { method: 'POST' }),
+  stop: (id: string) => request<Session>(`/sessions/${id}/stop`, { method: 'POST' }),
+  getQR: (id: string) => request<{ qrCode: string; status: string }>(`/sessions/${id}/qr`),
+  getStats: () => request<SessionStats>('/sessions/stats/overview'),
+  getGroups: (id: string) =>
+    request<{ id: string; name: string; linkedParentJID?: string | null }[]>(`/sessions/${id}/groups`),
+  // Bound the chats list request so a stalled proxy/backend connection cannot leave the sidebar
+  // spinner running forever. The backend itself times out live engine fetches after 15s.
+  getChats: (id: string) => request<Chat[]>(`/sessions/${id}/chats`, { timeoutMs: 20000 }),
+  markChatRead: (id: string, chatId: string) =>
+    request<{ success: boolean }>(`/sessions/${id}/chats/read`, {
+      method: 'POST',
+      body: JSON.stringify({ chatId }),
+    }),
+  getChatMessages: (id: string, chatId: string, limit = 100) =>
+    request<{ messages: ChatMessage[]; total: number }>(
+      `/sessions/${id}/messages?chatId=${encodeURIComponent(chatId)}&limit=${limit}`,
+    ),
+};
+
+// =============================================================================
+// Webhook API
+// =============================================================================
+
+export const webhookApi = {
+  listBySession: (sessionId: string) => request<Webhook[]>(`/sessions/${sessionId}/webhooks`),
+  listAll: () => request<Webhook[]>('/webhooks'),
+  get: (sessionId: string, id: string) => request<Webhook>(`/sessions/${sessionId}/webhooks/${id}`),
+  create: (sessionId: string, data: { url: string; events: string[] }) =>
+    request<Webhook>(`/sessions/${sessionId}/webhooks`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (sessionId: string, id: string, data: Partial<Webhook>) =>
+    request<Webhook>(`/sessions/${sessionId}/webhooks/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (sessionId: string, id: string) =>
+    request<void>(`/sessions/${sessionId}/webhooks/${id}`, { method: 'DELETE' }),
+  test: (sessionId: string, id: string) =>
+    request<{ success: boolean; statusCode?: number; error?: string }>(`/sessions/${sessionId}/webhooks/${id}/test`, {
+      method: 'POST',
+    }),
+};
+
+// =============================================================================
+// Template API
+// =============================================================================
+
+export const templateApi = {
+  list: (sessionId: string) => request<MessageTemplate[]>(`/sessions/${sessionId}/templates`),
+  get: (sessionId: string, id: string) => request<MessageTemplate>(`/sessions/${sessionId}/templates/${id}`),
+  create: (sessionId: string, data: TemplatePayload) =>
+    request<MessageTemplate>(`/sessions/${sessionId}/templates`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (sessionId: string, id: string, data: Partial<TemplatePayload>) =>
+    request<MessageTemplate>(`/sessions/${sessionId}/templates/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (sessionId: string, id: string) =>
+    request<void>(`/sessions/${sessionId}/templates/${id}`, { method: 'DELETE' }),
+};
+
+// =============================================================================
+// Contact API
+// =============================================================================
+
+export interface CheckNumberResponse {
+  number: string;
+  exists: boolean;
+  /** Engine-canonical WhatsApp id for the number (e.g. `…@c.us` or `…@lid`), or null if unregistered. */
+  whatsappId: string | null;
+}
+
+export interface ContactRecord {
+  id: string;
+  name?: string;
+  pushName?: string;
+  number: string;
+  isMyContact: boolean;
+  isBlocked: boolean;
+  profilePicUrl?: string;
+}
+
+export interface SavedContactRecord {
+  id: string;
+  sessionId: string;
+  name?: string | null;
+  number: string;
+  source: 'imported' | 'session';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const contactApi = {
+  list: (sessionId: string) => request<ContactRecord[]>(`/sessions/${sessionId}/contacts`),
+  listSaved: (sessionId: string) => request<SavedContactRecord[]>(`/sessions/${sessionId}/contacts/saved`),
+  saveBulk: (sessionId: string, contacts: Array<{ name?: string; number: string; source?: 'imported' | 'session' }>) =>
+    request<SavedContactRecord[]>(`/sessions/${sessionId}/contacts/saved`, {
+      method: 'POST',
+      body: JSON.stringify({ contacts }),
+    }),
+  clearSaved: (sessionId: string) =>
+    request<{ success: boolean }>(`/sessions/${sessionId}/contacts/saved`, { method: 'DELETE' }),
+  deleteSaved: (sessionId: string, id: string) =>
+    request<{ success: boolean }>(`/sessions/${sessionId}/contacts/saved/${id}`, { method: 'DELETE' }),
+  checkNumber: (sessionId: string, number: string) =>
+    request<CheckNumberResponse>(`/sessions/${sessionId}/contacts/check/${encodeURIComponent(number)}`),
+};
+
+// =============================================================================
+// API Key API
+// =============================================================================
+
+export const apiKeyApi = {
+  list: () => request<ApiKey[]>('/auth/api-keys'),
+  get: (id: string) => request<ApiKey>(`/auth/api-keys/${id}`),
+  create: (data: {
+    name: string;
+    role: string;
+    allowedIps?: string[];
+    allowedSessions?: string[];
+    expiresAt?: string;
+  }) =>
+    request<ApiKey>('/auth/api-keys', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: Partial<ApiKey>) =>
+    request<ApiKey>(`/auth/api-keys/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) => request<void>(`/auth/api-keys/${id}`, { method: 'DELETE' }),
+  revoke: (id: string) => request<ApiKey>(`/auth/api-keys/${id}/revoke`, { method: 'POST' }),
+};
+
+// =============================================================================
+// Audit/Logs API
+// =============================================================================
+
+export const auditApi = {
+  list: (params?: { action?: string; severity?: string; limit?: number; offset?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.action) query.set('action', params.action);
+    if (params?.severity) query.set('severity', params.severity);
+    if (params?.limit) query.set('limit', String(params.limit));
+    if (params?.offset) query.set('offset', String(params.offset));
+    const queryStr = query.toString();
+    return request<{ data: AuditLog[]; total: number }>(`/audit${queryStr ? `?${queryStr}` : ''}`);
+  },
+};
+
+// =============================================================================
+// Message API
+// =============================================================================
+
+export const messageApi = {
+  sendText: (sessionId: string, chatId: string, text: string) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-text`, {
+      method: 'POST',
+      body: JSON.stringify({ chatId, text }),
+    }),
+  sendImage: (sessionId: string, chatId: string, url: string, caption?: string) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-image`, {
+      method: 'POST',
+      body: JSON.stringify({ chatId, url, caption }),
+    }),
+  sendVideo: (sessionId: string, chatId: string, url: string, caption?: string) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-video`, {
+      method: 'POST',
+      body: JSON.stringify({ chatId, url, caption }),
+    }),
+  sendAudio: (sessionId: string, chatId: string, url: string) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-audio`, {
+      method: 'POST',
+      body: JSON.stringify({ chatId, url }),
+    }),
+  sendDocument: (sessionId: string, chatId: string, url: string, filename?: string) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-document`, {
+      method: 'POST',
+      body: JSON.stringify({ chatId, url, filename }),
+    }),
+  sendMedia: (
+    sessionId: string,
+    chatId: string,
+    mediaType: 'image' | 'video' | 'audio' | 'document',
+    payload: SendMediaPayload,
+  ) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-${mediaType}`, {
+      method: 'POST',
+      body: JSON.stringify({ chatId, ...payload }),
+    }),
+  reply: (sessionId: string, data: { chatId: string; quotedMessageId: string; text: string }) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/reply`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  react: (sessionId: string, data: { chatId: string; messageId: string; emoji: string }) =>
+    request<void>(`/sessions/${sessionId}/messages/react`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  sendTemplate: (
+    sessionId: string,
+    data: { chatId: string; templateId?: string; templateName?: string; variables?: Record<string, string> },
+  ) =>
+    request<MessageResponse>(`/sessions/${sessionId}/messages/send-template`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  delete: (sessionId: string, data: { chatId: string; messageId: string; forEveryone?: boolean }) =>
+    request<void>(`/sessions/${sessionId}/messages/delete`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  sendBulk: (
+    sessionId: string,
+    data: { batchId?: string; messages: BulkMessageItem[]; options?: BulkMessageOptions },
+  ) =>
+    request<BulkMessageBatchResponse>(`/sessions/${sessionId}/messages/send-bulk`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  getBatchStatus: (sessionId: string, batchId: string) =>
+    request<BulkMessageBatchStatus>(`/sessions/${sessionId}/messages/batch/${batchId}`),
+  cancelBatch: (sessionId: string, batchId: string) =>
+    request<{ batchId: string; status: string; progress: BulkMessageBatchStatus['progress'] }>(
+      `/sessions/${sessionId}/messages/batch/${batchId}/cancel`,
+      {
+        method: 'POST',
+      },
+    ),
+};
+
+// =============================================================================
+// Health & Infrastructure API
+// =============================================================================
+
+export const healthApi = {
+  check: () => request<HealthStatus>('/health'),
+  ready: () => request<HealthStatus>('/health/ready'),
+};
+
+export const infraApi = {
+  getStatus: () => request<InfraStatus>('/infra/status'),
+  getConfig: () => request<SavedConfig>('/infra/config'),
+  updateConfig: (config: Partial<InfraStatus>) =>
+    request<InfraStatus>('/infra/config', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    }),
+  saveConfig: (config: SaveConfigPayload) =>
+    request<{ message: string; saved: boolean; envPath: string; profiles: string[] }>('/infra/config', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    }),
+  restart: (profiles?: string[], profilesToRemove?: string[]) =>
+    request<{
+      message: string;
+      restarting: boolean;
+      profiles: string[];
+      profilesToRemove: string[];
+      estimatedTime: number;
+    }>('/infra/restart', {
+      method: 'POST',
+      body: JSON.stringify({ profiles: profiles || [], profilesToRemove: profilesToRemove || [] }),
+    }),
+  healthCheck: () => request<{ status: string; timestamp: string }>('/infra/health'),
+};
+
+// =============================================================================
+// Settings API
+// =============================================================================
+
+export const settingsApi = {
+  get: () => request<Settings>('/settings'),
+  update: (settings: Partial<Settings>) =>
+    request<Settings>('/settings', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    }),
+};
+
+// =============================================================================
+// Plugin Types
+// =============================================================================
+
+/** Field definition within a plugin's config schema (mirrors the backend PluginConfigSchema). */
+export interface PluginConfigField {
+  type: 'string' | 'number' | 'boolean' | 'array' | 'object';
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: unknown[];
+  required?: boolean;
+  secret?: boolean;
+}
+
+export interface PluginConfigSchema {
+  type: 'object';
+  properties: Record<string, PluginConfigField>;
+}
+
+export interface Plugin {
+  id: string;
+  name: string;
+  version: string;
+  type: 'engine' | 'storage' | 'queue' | 'auth' | 'extension';
+  description?: string;
+  author?: string;
+  status: 'installed' | 'enabled' | 'disabled' | 'error';
+  config: Record<string, unknown>;
+  builtIn: boolean;
+  provides: string[];
+  /** Declared config fields, when the plugin exposes a schema (drives the dashboard config form). */
+  configSchema?: PluginConfigSchema;
+  loadedAt?: string;
+  enabledAt?: string;
+  error?: string;
+}
+
+export interface Engine {
+  id: string;
+  name: string;
+  enabled: boolean;
+  features: string[];
+  /** Underlying engine library (e.g. whatsapp-web.js 1.34.7), distinct from the adapter version. */
+  library?: { name: string; version: string };
+}
+
+// =============================================================================
+// Plugins API
+// =============================================================================
+
+export const pluginsApi = {
+  list: () => request<Plugin[]>('/plugins'),
+  get: (id: string) => request<Plugin>(`/plugins/${id}`),
+  enable: (id: string) =>
+    request<{ success: boolean; message: string }>(`/plugins/${id}/enable`, {
+      method: 'POST',
+    }),
+  disable: (id: string) =>
+    request<{ success: boolean; message: string }>(`/plugins/${id}/disable`, {
+      method: 'POST',
+    }),
+  updateConfig: (id: string, config: Record<string, unknown>) =>
+    request<{ success: boolean; message: string }>(`/plugins/${id}/config`, {
+      method: 'PUT',
+      body: JSON.stringify({ config }),
+    }),
+  healthCheck: (id: string) => request<{ healthy: boolean; message?: string }>(`/plugins/${id}/health`),
+  getEngines: () => request<Engine[]>('/infra/engines'),
+  getCurrentEngine: () => request<{ engineType: string }>('/infra/engines/current'),
+};

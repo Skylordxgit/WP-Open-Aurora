@@ -1,0 +1,78 @@
+# OpenWA - Local smoke / quick-start compose (L22)
+#
+# This builds and runs the PRODUCTION image (same Dockerfile) against a local SQLite DB
+# with a bind-mounted ./data — it is a single-container local smoke test, NOT a
+# hot-reload development environment (there is no source mount or `start:dev`).
+# DATABASE_SYNCHRONIZE=true keeps the SQLite schema zero-config for local use; the
+# production compose (docker-compose.yml) never forces synchronize (it defaults to false).
+#
+# Quick Start: docker compose -f docker-compose.dev.yml up -d
+
+services:
+  # API Backend
+  openwa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openwa-api
+    # Container hardening (finding H7) — same posture as production (same Dockerfile/entrypoint).
+    security_opt:
+      - 'no-new-privileges:true'
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    read_only: true
+    tmpfs:
+      - /tmp
+    pids_limit: 512
+    mem_limit: ${OPENWA_MEM_LIMIT:-2g}
+    ports:
+      # Bind to localhost by default; set BIND_HOST=0.0.0.0 in .env to reach it from another host.
+      - '${BIND_HOST:-127.0.0.1}:2785:2785'
+    environment:
+      - NODE_ENV=development
+      - PORT=2785
+      - HOME=/tmp
+      # Chromium reads its home from the passwd entry (no /home/openwa), so it needs writable, existing
+      # config/cache dirs on the tmpfs or it hard-crashes at launch; the entrypoint pre-creates them. (#254)
+      - XDG_CONFIG_HOME=/tmp/.config
+      - XDG_CACHE_HOME=/tmp/.cache
+      - DATABASE_TYPE=sqlite
+      - DATABASE_NAME=/app/data/openwa.sqlite
+      - DATABASE_SYNCHRONIZE=true
+      - ENGINE_TYPE=whatsapp-web.js
+      - SESSION_DATA_PATH=/app/data/sessions
+      - PUPPETEER_HEADLESS=true
+      - PUPPETEER_ARGS=--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu
+      # Pin the WhatsApp Web version if a session hangs at "authenticating" after scanning the QR
+      # (whatsapp-web.js 1.34.x can stall on an incompatible auto-selected WA-Web version, #251/#273).
+      # Empty = auto-select (default). Set WWEBJS_WEB_VERSION in .env to a known-good version — see
+      # docs/12-troubleshooting-faq.md.
+      - WWEBJS_WEB_VERSION=${WWEBJS_WEB_VERSION:-}
+      - WWEBJS_WEB_VERSION_REMOTE_PATH=${WWEBJS_WEB_VERSION_REMOTE_PATH:-}
+      - STORAGE_TYPE=local
+      - STORAGE_LOCAL_PATH=/app/data/media
+      - WEBHOOK_TIMEOUT=10000
+      - WEBHOOK_MAX_RETRIES=3
+      - QUEUE_ENABLED=false
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:2785/api/health/ready']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # The dashboard SPA is bundled into the image and served by NestJS on the same port:
+  # open http://localhost:2785 — there is no separate dashboard container.
+
+networks:
+  default:
+    name: openwa-network
