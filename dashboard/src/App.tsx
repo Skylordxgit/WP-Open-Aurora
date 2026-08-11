@@ -6,25 +6,23 @@ import { Layout } from './components/Layout';
 import { ToastProvider } from './components/Toast';
 import { RoleProvider, useRole, type UserRole } from './hooks/useRole';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { API_BASE_URL } from './services/api';
+import {
+  clearOmegaToken,
+  getOmegaToken,
+  omegaLogin,
+  omegaLogout,
+  omegaMe,
+  setOmegaToken,
+  type OmegaRole,
+  type OmegaUser,
+} from './omega/api';
 import { ClientApp } from './client/ClientApp';
 import './App.css';
 import './omega/styles/omega.css';
 
-const OPENWA_API_KEY_STORAGE_KEY = 'openwa_api_key';
-
-function getStoredApiKey() {
-  return localStorage.getItem(OPENWA_API_KEY_STORAGE_KEY) || sessionStorage.getItem(OPENWA_API_KEY_STORAGE_KEY);
-}
-
-function persistApiKey(key: string) {
-  localStorage.setItem(OPENWA_API_KEY_STORAGE_KEY, key);
-  sessionStorage.setItem(OPENWA_API_KEY_STORAGE_KEY, key);
-}
-
 function clearStoredApiKey() {
-  localStorage.removeItem(OPENWA_API_KEY_STORAGE_KEY);
-  sessionStorage.removeItem(OPENWA_API_KEY_STORAGE_KEY);
+  localStorage.removeItem('openwa_api_key');
+  sessionStorage.removeItem('openwa_api_key');
 }
 
 const Login = lazy(() => import('./pages/Login').then(m => ({ default: m.Login })));
@@ -57,59 +55,64 @@ const queryClient = new QueryClient({
   },
 });
 
+function isAdminOmegaRole(role: OmegaRole) {
+  return role === 'super_admin' || role === 'support_admin';
+}
+
+function mapOmegaRoleToDashboardRole(role: OmegaRole): UserRole {
+  if (role === 'super_admin' || role === 'support_admin') {
+    return 'admin';
+  }
+  if (role === 'client_admin') {
+    return 'operator';
+  }
+  return 'viewer';
+}
+
 function AppContent() {
-  const savedKey = getStoredApiKey();
-  const [isAuthenticated, setIsAuthenticated] = useState(!!savedKey);
-  const [, setApiKey] = useState(savedKey || '');
+  const [authUser, setAuthUser] = useState<OmegaUser | null>(null);
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
   const { setRole, role } = useRole();
 
-  const handleLogin = async (key: string) => {
-    setApiKey(key);
-    persistApiKey(key);
-
-    // Fetch the role from API
-    try {
-      const response = await fetch(`${API_BASE_URL}/auth/validate`, {
-        method: 'POST',
-        headers: { 'X-API-Key': key },
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setRole(data.role as UserRole);
-      }
-    } catch {
-      // Default to viewer if we can't fetch role
-      setRole('viewer');
-    }
-
-    setIsAuthenticated(true);
-  };
-
-  const handleLogout = () => {
-    setApiKey('');
-    setIsAuthenticated(false);
-    setRole(null);
+  const handleLogin = async (identifier: string, password: string) => {
+    const result = await omegaLogin(identifier, password);
+    setOmegaToken(result.token);
+    const user = result.user ?? (await omegaMe());
+    setAuthUser(user);
+    setRole(mapOmegaRoleToDashboardRole(user.role));
     clearStoredApiKey();
   };
 
-  // Re-validate and get role on mount if already authenticated
-  useEffect(() => {
-    if (!savedKey) return;
+  const handleLogout = () => {
+    void omegaLogout().catch(() => undefined);
+    clearOmegaToken();
+    clearStoredApiKey();
+    setAuthUser(null);
+    setRole(null);
+  };
 
-    fetch(`${API_BASE_URL}/auth/validate`, {
-      method: 'POST',
-      headers: { 'X-API-Key': savedKey },
-    })
-      .then(res => res.json())
-      .then(data => {
-        if (data.valid && data.role) {
-          setRole(data.role as UserRole);
-        }
+  useEffect(() => {
+    const token = getOmegaToken();
+    if (!token) {
+      setIsCheckingSession(false);
+      return;
+    }
+
+    omegaMe()
+      .then(user => {
+        setAuthUser(user);
+        setRole(mapOmegaRoleToDashboardRole(user.role));
+        clearStoredApiKey();
       })
       .catch(() => {
-        // Keep existing role from localStorage if validation fails
+        clearOmegaToken();
+        setAuthUser(null);
+        setRole(null);
+      })
+      .finally(() => {
+        setIsCheckingSession(false);
       });
-  }, [savedKey, setRole]);
+  }, [setRole]);
 
   const loadingFallback = (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
@@ -117,38 +120,59 @@ function AppContent() {
     </div>
   );
 
-  if (!isAuthenticated) {
-    return <Suspense fallback={loadingFallback}><Login onLogin={handleLogin} /></Suspense>;
+  if (isCheckingSession) {
+    return loadingFallback;
   }
+
+  if (!authUser) {
+    return (
+      <Suspense fallback={loadingFallback}>
+        <Login onLogin={handleLogin} />
+      </Suspense>
+    );
+  }
+
+  const isAdmin = isAdminOmegaRole(authUser.role);
 
   return (
     <ToastProvider>
       <BrowserRouter>
         <Suspense fallback={loadingFallback}>
-        <Routes>
-          <Route path="/" element={<Layout onLogout={handleLogout} userRole={role} />}>
-            <Route index element={<Dashboard />} />
-            <Route path="sessions" element={<Sessions />} />
-            <Route path="chats" element={<Chats />} />
-            <Route path="webhooks" element={<Webhooks />} />
-            <Route path="templates" element={<Templates />} />
-            <Route path="contacts" element={<Contacts />} />
-            {role === 'admin' && <Route path="api-keys" element={<ApiKeys />} />}
-            {role === 'admin' && <Route path="clients" element={<OmegaClients />} />}
-            {role === 'admin' && <Route path="clients/new" element={<OmegaClientForm />} />}
-            {role === 'admin' && <Route path="clients/:id" element={<OmegaClientDetails />} />}
-            {role === 'admin' && <Route path="clients/:id/edit" element={<OmegaClientForm />} />}
-            {role === 'admin' && <Route path="users" element={<OmegaStaff />} />}
-            {role === 'admin' && <Route path="teams" element={<OmegaTeams />} />}
-            <Route path="bulk-messaging" element={<BulkMessaging />} />
-            <Route path="logs" element={<Logs />} />
-            <Route path="message-tester" element={<MessageTester />} />
-            {role === 'admin' && <Route path="branding" element={<Branding />} />}
-            <Route path="infrastructure" element={<Infrastructure />} />
-            {role === 'admin' && <Route path="plugins" element={<Plugins />} />}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Route>
-        </Routes>
+          <Routes>
+            {isAdmin ? (
+              <Route path="/" element={<Layout onLogout={handleLogout} userRole={role} />}>
+                <Route index element={<Dashboard />} />
+                <Route path="sessions" element={<Sessions />} />
+                <Route path="chats" element={<Chats />} />
+                <Route path="webhooks" element={<Webhooks />} />
+                <Route path="templates" element={<Templates />} />
+                <Route path="contacts" element={<Contacts />} />
+                {role === 'admin' && <Route path="api-keys" element={<ApiKeys />} />}
+                {role === 'admin' && <Route path="clients" element={<OmegaClients />} />}
+                {role === 'admin' && <Route path="clients/new" element={<OmegaClientForm />} />}
+                {role === 'admin' && <Route path="clients/:id" element={<OmegaClientDetails />} />}
+                {role === 'admin' && <Route path="clients/:id/edit" element={<OmegaClientForm />} />}
+                {role === 'admin' && <Route path="users" element={<OmegaStaff />} />}
+                {role === 'admin' && <Route path="teams" element={<OmegaTeams />} />}
+                <Route path="bulk-messaging" element={<BulkMessaging />} />
+                <Route path="logs" element={<Logs />} />
+                <Route path="message-tester" element={<MessageTester />} />
+                {role === 'admin' && <Route path="branding" element={<Branding />} />}
+                <Route path="infrastructure" element={<Infrastructure />} />
+                {role === 'admin' && <Route path="plugins" element={<Plugins />} />}
+                <Route path="app" element={<Navigate to="/" replace />} />
+                <Route path="workspace" element={<Navigate to="/" replace />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Route>
+            ) : (
+              <>
+                <Route path="/" element={<ClientApp standalone={false} onLoggedOut={handleLogout} />} />
+                <Route path="/app" element={<Navigate to="/" replace />} />
+                <Route path="/workspace" element={<Navigate to="/" replace />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </>
+            )}
+          </Routes>
         </Suspense>
       </BrowserRouter>
     </ToastProvider>
@@ -156,10 +180,6 @@ function AppContent() {
 }
 
 function App() {
-  if (window.location.pathname.startsWith('/app')) {
-    return <ClientApp />;
-  }
-
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>

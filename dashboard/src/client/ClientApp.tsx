@@ -72,7 +72,13 @@ function formatMessageTime(value?: number | string) {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export function ClientApp() {
+export function ClientApp({
+  standalone = true,
+  onLoggedOut,
+}: {
+  standalone?: boolean;
+  onLoggedOut?: () => void;
+}) {
   const { t, i18n } = useTranslation();
   const branding = useBranding();
   const { resolvedTheme, toggleTheme } = useTheme();
@@ -119,6 +125,9 @@ export function ClientApp() {
     const token = getUserPortalSession();
     if (!token) {
       setIsCheckingSession(false);
+      if (!standalone) {
+        onLoggedOut?.();
+      }
       return;
     }
 
@@ -132,11 +141,12 @@ export function ClientApp() {
         setUser(null);
         setWorkspace(null);
         setMessages([]);
+        onLoggedOut?.();
       })
       .finally(() => {
         setIsCheckingSession(false);
       });
-  }, [loadWorkspace]);
+  }, [loadWorkspace, onLoggedOut, standalone]);
 
   useEffect(() => {
     if (!user) return;
@@ -269,6 +279,7 @@ export function ClientApp() {
     setMessages([]);
     setSelectedChatKey('');
     setForm({ email: '', password: '' });
+    onLoggedOut?.();
   };
 
   const handleSend = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -326,6 +337,10 @@ export function ClientApp() {
   }
 
   if (!user) {
+    if (!standalone) {
+      return null;
+    }
+
     return (
       <div className="client-login-shell">
         <div className="client-login-card">

@@ -1,5 +1,6 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AuthModule } from '../auth/auth.module';
 import { MessageModule } from '../message/message.module';
 import { Message } from '../message/entities/message.entity';
 import { Session } from '../session/entities/session.entity';
@@ -29,6 +30,7 @@ import { OmegaUsageService } from './omega-usage.service';
 
 @Module({
   imports: [
+    forwardRef(() => AuthModule),
     MessageModule,
     SessionModule,
     TypeOrmModule.forFeature(
@@ -59,5 +61,6 @@ import { OmegaUsageService } from './omega-usage.service';
     OpenwaApiClientService,
     OmegaUsageService,
   ],
+  exports: [OmegaAuthService],
 })
 export class OmegaModule {}

@@ -322,15 +322,18 @@ interface RequestOptions extends RequestInit {
   timeoutMs?: number;
 }
 
+const OMEGA_TOKEN_KEY = 'omega_admin_token';
+
 async function request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
   const { timeoutMs, ...fetchOptions } = options;
 
+  const omegaToken = sessionStorage.getItem(OMEGA_TOKEN_KEY);
   const apiKey = localStorage.getItem('openwa_api_key') || sessionStorage.getItem('openwa_api_key');
 
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
-    ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+    ...(omegaToken ? { Authorization: `Bearer ${omegaToken}` } : apiKey ? { 'X-API-Key': apiKey } : {}),
     ...fetchOptions.headers,
   };
 
@@ -367,6 +370,8 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     // so the user isn't stuck on a dashboard that 401s every request.
     localStorage.removeItem('openwa_api_key');
     sessionStorage.removeItem('openwa_api_key');
+    sessionStorage.removeItem(OMEGA_TOKEN_KEY);
+    localStorage.removeItem('openwa_user_role');
     if (typeof window !== 'undefined') {
       window.location.assign('/');
       // The page is navigating away — halt this request's promise chain so callers neither

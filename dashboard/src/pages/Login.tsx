@@ -3,17 +3,17 @@ import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff, Languages } from 'lucide-react';
 import { useBranding } from '../hooks/useBranding';
 import { languageOptions, resolveSupportedLanguage, type SupportedLanguage } from '../i18n';
-import { API_BASE_URL } from '../services/api';
 import './Login.css';
 
 interface LoginProps {
-  onLogin: (apiKey: string) => void;
+  onLogin: (identifier: string, password: string) => Promise<void>;
 }
 
 export function Login({ onLogin }: LoginProps) {
   const { t, i18n } = useTranslation();
-  const [apiKey, setApiKey] = useState('');
-  const [showKey, setShowKey] = useState(false);
+  const [identifier, setIdentifier] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const branding = useBranding();
@@ -29,30 +29,18 @@ export function Login({ onLogin }: LoginProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!apiKey.trim()) {
-      setError(t('login.apiKeyRequired'));
+    if (!identifier.trim() || !password.trim()) {
+      setError(t('common.errorGeneric', { defaultValue: 'Please fill in all required fields' }));
       return;
     }
+
     setIsLoading(true);
     setError('');
 
     try {
-      const response = await fetch(`${API_BASE_URL}/auth/validate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
-        },
-      });
-
-      if (response.ok) {
-        onLogin(apiKey);
-      } else {
-        const errorData = await response.json().catch(() => ({}));
-        setError(errorData.message || t('login.invalidKey'));
-      }
-    } catch {
-      setError(t('login.connectionError'));
+      await onLogin(identifier, password);
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : t('login.connectionError'));
     } finally {
       setIsLoading(false);
     }
@@ -90,23 +78,39 @@ export function Login({ onLogin }: LoginProps) {
 
         <form onSubmit={handleSubmit} className="login-form">
           <div className="input-group">
-            <label htmlFor="apiKey">{t('login.apiKey')}</label>
+            <label htmlFor="identifier">{t('common.username', { defaultValue: 'Email' })}</label>
             <div className="input-wrapper">
               <input
-                id="apiKey"
-                type={showKey ? 'text' : 'password'}
-                value={apiKey}
-                onChange={e => setApiKey(e.target.value)}
-                placeholder={t('login.apiKeyPlaceholder')}
+                id="identifier"
+                type="text"
+                value={identifier}
+                onChange={e => setIdentifier(e.target.value)}
+                placeholder={t('clientPortal.emailPlaceholder', { defaultValue: 'name@company.com' })}
                 className={error ? 'error' : ''}
+                autoComplete="username"
+              />
+            </div>
+          </div>
+
+          <div className="input-group">
+            <label htmlFor="password">{t('common.password', { defaultValue: 'Password' })}</label>
+            <div className="input-wrapper">
+              <input
+                id="password"
+                type={showPassword ? 'text' : 'password'}
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder={t('clientPortal.passwordPlaceholder', { defaultValue: 'Enter your password' })}
+                className={error ? 'error' : ''}
+                autoComplete="current-password"
               />
               <button
                 type="button"
                 className="toggle-visibility"
-                onClick={() => setShowKey(!showKey)}
-                aria-label={showKey ? t('common.hideApiKey') : t('common.showApiKey')}
+                onClick={() => setShowPassword(!showPassword)}
+                aria-label={showPassword ? t('common.hideApiKey') : t('common.showApiKey')}
               >
-                {showKey ? <EyeOff size={20} /> : <Eye size={20} />}
+                {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
               </button>
             </div>
             {error && <span className="error-message">{error}</span>}
