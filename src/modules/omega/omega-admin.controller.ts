@@ -98,7 +98,11 @@ export class OmegaAdminController {
 
   @Get('sessions')
   @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
-  listSessions(@CurrentOmegaUser() user: OmegaUser, @Query('status') status?: string, @Query('clientId') clientId?: string) {
+  listSessions(
+    @CurrentOmegaUser() user: OmegaUser,
+    @Query('status') status?: string,
+    @Query('clientId') clientId?: string,
+  ) {
     return this.omegaAdminService.listSessions({ status, clientId }, user);
   }
 
@@ -122,7 +126,11 @@ export class OmegaAdminController {
 
   @Patch('sessions/:id/replacement')
   @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
-  updateReplacement(@Param('id') id: string, @Body() dto: UpdateOmegaSessionReplacementDto, @CurrentOmegaUser() user: OmegaUser) {
+  updateReplacement(
+    @Param('id') id: string,
+    @Body() dto: UpdateOmegaSessionReplacementDto,
+    @CurrentOmegaUser() user: OmegaUser,
+  ) {
     return this.omegaAdminService.updateReplacementFlag(id, dto.replacementRequested, user);
   }
 

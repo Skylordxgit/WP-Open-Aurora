@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { ApiKeyGuard } from './api-key.guard';
 import { AuthService } from '../auth.service';
 import { ApiKey, ApiKeyRole } from '../entities/api-key.entity';
+import { OmegaAuthService } from '../../omega/omega-auth.service';
 
 function createMockApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
   return {
@@ -48,6 +49,7 @@ function createMockContext(
 describe('ApiKeyGuard', () => {
   let guard: ApiKeyGuard;
   let authService: jest.Mocked<Partial<AuthService>>;
+  let omegaAuthService: jest.Mocked<Partial<OmegaAuthService>>;
   let reflector: jest.Mocked<Reflector>;
   let configService: jest.Mocked<Partial<ConfigService>>;
 
@@ -55,13 +57,21 @@ describe('ApiKeyGuard', () => {
     configService = {
       get: jest.fn().mockReturnValue(trustedProxies),
     };
-    return new ApiKeyGuard(authService as AuthService, reflector, configService as ConfigService);
+    return new ApiKeyGuard(
+      authService as AuthService,
+      omegaAuthService as OmegaAuthService,
+      reflector,
+      configService as ConfigService,
+    );
   }
 
   beforeEach(() => {
     authService = {
       validateApiKey: jest.fn(),
       hasPermission: jest.fn(),
+    };
+    omegaAuthService = {
+      validateSessionToken: jest.fn(),
     };
 
     reflector = {
@@ -82,18 +92,23 @@ describe('ApiKeyGuard', () => {
   });
 
   it('should reject requests without X-API-Key header', async () => {
-    reflector.getAllAndOverride.mockReturnValueOnce(false); // not public
+    reflector
+      .getAllAndOverride
+      .mockReturnValueOnce(false) // isPublic
+      .mockReturnValueOnce(undefined) // skipApiKey
+      .mockReturnValueOnce(undefined); // requiredRole
 
     const context = createMockContext({});
 
     await expect(guard.canActivate(context)).rejects.toThrow(UnauthorizedException);
-    await expect(guard.canActivate(context)).rejects.toThrow('API key is required');
+    await expect(guard.canActivate(context)).rejects.toThrow('API key or Aurora session is required');
   });
 
   it('should accept X-API-Key header', async () => {
     reflector.getAllAndOverride
-      .mockReturnValueOnce(false) // not public
-      .mockReturnValueOnce(undefined); // no required role
+      .mockReturnValueOnce(false) // isPublic
+      .mockReturnValueOnce(undefined) // skipApiKey
+      .mockReturnValueOnce(undefined); // requiredRole
 
     const apiKey = createMockApiKey();
     (authService.validateApiKey as jest.Mock).mockResolvedValue(apiKey);
@@ -106,20 +121,26 @@ describe('ApiKeyGuard', () => {
   });
 
   it('should accept Authorization Bearer header', async () => {
-    reflector.getAllAndOverride.mockReturnValueOnce(false).mockReturnValueOnce(undefined);
+    reflector.getAllAndOverride
+      .mockReturnValueOnce(false) // isPublic
+      .mockReturnValueOnce(undefined) // skipApiKey
+      .mockReturnValueOnce(undefined); // requiredRole
 
     const apiKey = createMockApiKey();
     (authService.validateApiKey as jest.Mock).mockResolvedValue(apiKey);
 
-    const context = createMockContext({ authorization: 'Bearer my-bearer-key' });
+    const context = createMockContext({ authorization: 'Bearer owa_my-bearer-key' });
     const result = await guard.canActivate(context);
 
     expect(result).toBe(true);
-    expect(authService.validateApiKey).toHaveBeenCalledWith('my-bearer-key', '127.0.0.1', undefined);
+    expect(authService.validateApiKey).toHaveBeenCalledWith('owa_my-bearer-key', '127.0.0.1', undefined);
   });
 
   it('should reject when API key validation fails', async () => {
-    reflector.getAllAndOverride.mockReturnValueOnce(false);
+    reflector.getAllAndOverride
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(undefined);
 
     (authService.validateApiKey as jest.Mock).mockRejectedValue(new UnauthorizedException('Invalid API key'));
 
@@ -144,7 +165,10 @@ describe('ApiKeyGuard', () => {
   });
 
   it('should pass session ID from route params to validateApiKey', async () => {
-    reflector.getAllAndOverride.mockReturnValueOnce(false).mockReturnValueOnce(undefined);
+    reflector.getAllAndOverride
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(undefined);
 
     const apiKey = createMockApiKey();
     (authService.validateApiKey as jest.Mock).mockResolvedValue(apiKey);
@@ -156,7 +180,10 @@ describe('ApiKeyGuard', () => {
   });
 
   it('ignores X-Forwarded-For by default (no trusted proxies) to prevent IP spoofing', async () => {
-    reflector.getAllAndOverride.mockReturnValueOnce(false).mockReturnValueOnce(undefined);
+    reflector.getAllAndOverride
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(undefined);
 
     const apiKey = createMockApiKey();
     (authService.validateApiKey as jest.Mock).mockResolvedValue(apiKey);
@@ -173,7 +200,10 @@ describe('ApiKeyGuard', () => {
 
   it('uses the rightmost untrusted hop when the request comes from a trusted proxy', async () => {
     guard = buildGuard(['10.0.0.0/8']);
-    reflector.getAllAndOverride.mockReturnValueOnce(false).mockReturnValueOnce(undefined);
+    reflector.getAllAndOverride
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(undefined);
 
     const apiKey = createMockApiKey();
     (authService.validateApiKey as jest.Mock).mockResolvedValue(apiKey);
@@ -191,7 +221,10 @@ describe('ApiKeyGuard', () => {
 
   it('ignores X-Forwarded-For when the direct peer is not a trusted proxy', async () => {
     guard = buildGuard(['10.0.0.0/8']);
-    reflector.getAllAndOverride.mockReturnValueOnce(false).mockReturnValueOnce(undefined);
+    reflector.getAllAndOverride
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(undefined);
 
     const apiKey = createMockApiKey();
     (authService.validateApiKey as jest.Mock).mockResolvedValue(apiKey);
@@ -205,7 +238,10 @@ describe('ApiKeyGuard', () => {
 
   it('normalizes an IPv4-mapped IPv6 proxy address (e.g. ::ffff:10.0.0.1)', async () => {
     guard = buildGuard(['10.0.0.0/8']);
-    reflector.getAllAndOverride.mockReturnValueOnce(false).mockReturnValueOnce(undefined);
+    reflector.getAllAndOverride
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(undefined);
 
     const apiKey = createMockApiKey();
     (authService.validateApiKey as jest.Mock).mockResolvedValue(apiKey);

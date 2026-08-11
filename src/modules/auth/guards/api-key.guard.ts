@@ -1,4 +1,12 @@
-import { Injectable, CanActivate, ExecutionContext, UnauthorizedException, ForbiddenException, Inject, forwardRef } from '@nestjs/common';
+import {
+  Injectable,
+  CanActivate,
+  ExecutionContext,
+  UnauthorizedException,
+  ForbiddenException,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
@@ -119,9 +127,7 @@ export class ApiKeyGuard implements CanActivate {
 
   private isOmegaAdmin(role: OmegaUserRole): boolean {
     return (
-      role === OmegaUserRole.SUPER_ADMIN ||
-      role === OmegaUserRole.SUPPORT_ADMIN ||
-      role === OmegaUserRole.CLIENT_ADMIN
+      role === OmegaUserRole.SUPER_ADMIN || role === OmegaUserRole.SUPPORT_ADMIN || role === OmegaUserRole.CLIENT_ADMIN
     );
   }
 

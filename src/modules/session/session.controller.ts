@@ -255,5 +255,4 @@ export class SessionController {
     await this.sessionService.sendChatState(id, dto.chatId, dto.state);
     return { success: true };
   }
-
 }

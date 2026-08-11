@@ -356,7 +356,7 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
       clearTimeout(timeoutId);
     }
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Request timed out after ${Math.ceil(timeoutMs! / 1000)}s`);
+      throw new Error(`Request timed out after ${Math.ceil(timeoutMs! / 1000)}s`, { cause: error });
     }
     throw error;
   }

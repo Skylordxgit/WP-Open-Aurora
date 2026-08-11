@@ -120,7 +120,8 @@ export class OmegaAdminService implements OnModuleInit {
         plans: plans.length,
         totalSessions: scopedSessions.length,
         connectedSessions: scopedSessions.filter(session => session.status === OmegaSessionStatus.CONNECTED).length,
-        reconnectSessions: scopedSessions.filter(session => session.status === OmegaSessionStatus.NEEDS_RECONNECT).length,
+        reconnectSessions: scopedSessions.filter(session => session.status === OmegaSessionStatus.NEEDS_RECONNECT)
+          .length,
         unassignedSessions: scopedSessions.filter(session => !session.clientId).length,
         messagesThisMonth: usageOverview.totals.messagesThisMonth,
         messagesToday: usageOverview.totals.messagesToday,
@@ -978,11 +979,7 @@ export class OmegaAdminService implements OnModuleInit {
     return [];
   }
 
-  private scopeSessionsForActor(
-    sessions: OmegaWhatsappSession[],
-    actor?: OmegaUser,
-    scopedClientIds?: Set<string>,
-  ) {
+  private scopeSessionsForActor(sessions: OmegaWhatsappSession[], actor?: OmegaUser, scopedClientIds?: Set<string>) {
     if (actor?.role !== OmegaUserRole.CLIENT_ADMIN) {
       return sessions;
     }
