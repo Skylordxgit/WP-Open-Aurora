@@ -17,6 +17,7 @@ import {
   Image as ImageIcon,
 } from 'lucide-react';
 import { infraApi, API_BASE_URL } from '../services/api';
+import { useBranding } from '../hooks/useBranding';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useInfraStatusQuery, useInfraConfigQuery } from '../hooks/queries';
 import { PageHeader } from '../components/PageHeader';
@@ -89,6 +90,7 @@ interface RateLimitConfig {
 
 export function Infrastructure() {
   const { t } = useTranslation();
+  const branding = useBranding();
   useDocumentTitle(t('infrastructure.title'));
   const toast = useToast();
   const { data: infraStatus, isLoading: loading } = useInfraStatusQuery();
@@ -501,11 +503,11 @@ export function Infrastructure() {
 
           <div className="branding-panel">
             <div className="branding-preview">
-              <img src="/openwa_logo.png" alt="Current branding logo" className="branding-logo-preview" />
+              <img src={branding.logoSrc} alt="Current branding logo" className="branding-logo-preview" />
               <div className="branding-preview-copy">
                 <h3>Current Dashboard Identity</h3>
                 <p>
-                  The dashboard now uses your local PNG logo for the sidebar, login screen, and browser tab icon.
+                  The dashboard uses the saved branding settings for the sidebar, login screen, employee portal, and browser tab icon.
                 </p>
               </div>
             </div>
@@ -516,7 +518,7 @@ export function Infrastructure() {
                   <MonitorSmartphone size={16} />
                   <span>Live app logo</span>
                 </div>
-                <code>/openwa_logo.png</code>
+                <code>{branding.logoSrc.startsWith('data:') ? 'Embedded branding image' : branding.logoSrc}</code>
                 <p>Used in the main sidebar and login screen.</p>
               </div>
 
@@ -525,7 +527,7 @@ export function Infrastructure() {
                   <ImageIcon size={16} />
                   <span>Browser tab icon</span>
                 </div>
-                <code>/openwa_logo.png</code>
+                <code>{branding.faviconSrc.startsWith('data:') ? 'Embedded branding image' : branding.faviconSrc}</code>
                 <p>Used as the local favicon in the dashboard shell.</p>
               </div>
 
@@ -534,8 +536,8 @@ export function Infrastructure() {
                   <ImageIcon size={16} />
                   <span>Source asset</span>
                 </div>
-                <code>docs/logo/openwa_logo.png</code>
-                <p>Matches the branding asset currently stored in the repo docs folder.</p>
+                <code>{branding.logoSrc.startsWith('data:') ? 'Stored in branding settings' : branding.logoSrc}</code>
+                <p>Matches the live branding source currently used throughout the app.</p>
               </div>
             </div>
           </div>

@@ -65,11 +65,12 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.9);
+  background: rgba(19, 31, 48, 0.94);
 }
 
 .login-language svg {
   flex-shrink: 0;
+  color: var(--text-muted);
 }
 
 .login-language select {
@@ -81,6 +82,13 @@
   background: transparent;
   font: inherit;
   cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.login-language select option {
+  color: var(--text-primary);
+  background: #162233;
 }
 
 .login-language:focus-within {

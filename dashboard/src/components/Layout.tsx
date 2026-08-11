@@ -25,48 +25,49 @@ import {
   ChevronRight,
   Languages,
   Users2,
+  Bot,
 } from 'lucide-react';
 import { useTheme } from '../hooks/useTheme';
 import { useBranding } from '../hooks/useBranding';
-import { type UserRole } from '../hooks/useRole';
+import { type OmegaRole } from '../omega/api';
 import { languageOptions, resolveSupportedLanguage, rtlLanguages, type SupportedLanguage } from '../i18n';
 import './Layout.css';
 
 interface LayoutProps {
   onLogout: () => void;
-  userRole: UserRole | null;
+  omegaRole: OmegaRole;
 }
 
 const allNavItems = [
-  { to: '/', icon: LayoutDashboard, key: 'dashboard' as const, label: 'Dashboard', adminOnly: false },
-  { to: '/sessions', icon: Smartphone, key: 'sessions' as const, label: 'Sessions', adminOnly: false },
-  { to: '/chats', icon: MessageSquare, key: 'chats' as const, label: 'Chats', adminOnly: false },
-  { to: '/webhooks', icon: Webhook, key: 'webhooks' as const, label: 'Webhooks', adminOnly: false },
-  { to: '/templates', icon: ClipboardList, key: 'templates' as const, label: 'Templates', adminOnly: false },
-  { to: '/contacts', icon: Users2, key: 'contacts' as const, label: 'Contacts', adminOnly: false },
-  { to: '/api-keys', icon: Key, key: 'apiKeys' as const, label: 'API Keys', adminOnly: true },
-  { to: '/clients', icon: Building2, key: 'clients' as const, label: 'Clients', adminOnly: true },
-  { to: '/users', icon: Users2, key: 'users' as const, label: 'Users', adminOnly: true },
-  { to: '/teams', icon: Users2, key: 'teams' as const, label: 'Teams', adminOnly: true },
-  { to: '/bulk-messaging', icon: Megaphone, key: 'bulkMessaging' as const, label: 'Bulk Messaging', adminOnly: false },
-  { to: '/message-tester', icon: Send, key: 'messageTester' as const, label: 'Message Tester', adminOnly: false },
-  { to: '/branding', icon: Palette, key: 'branding' as const, label: 'Branding', adminOnly: true },
-  // Backend /infra/* is ADMIN-only; hide the nav item from non-admins (UX + defense-in-depth).
-  { to: '/infrastructure', icon: Server, key: 'infrastructure' as const, label: 'Infrastructure', adminOnly: true },
-  { to: '/plugins', icon: Puzzle, key: 'plugins' as const, label: 'Plugins', adminOnly: true },
-  { to: '/logs', icon: FileText, key: 'logs' as const, label: 'Logs', adminOnly: false },
+  { to: '/', icon: LayoutDashboard, key: 'dashboard' as const, label: 'Dashboard', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/sessions', icon: Smartphone, key: 'sessions' as const, label: 'Sessions', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/chats', icon: MessageSquare, key: 'chats' as const, label: 'Chats', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/webhooks', icon: Webhook, key: 'webhooks' as const, label: 'Webhooks', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/templates', icon: ClipboardList, key: 'templates' as const, label: 'Templates', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/contacts', icon: Users2, key: 'contacts' as const, label: 'Contacts', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/api-keys', icon: Key, key: 'apiKeys' as const, label: 'API Keys', roles: ['super_admin'] },
+  { to: '/clients', icon: Building2, key: 'clients' as const, label: 'Workspaces', roles: ['super_admin', 'support_admin'] },
+  { to: '/users', icon: Users2, key: 'users' as const, label: 'Users', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/teams', icon: Users2, key: 'teams' as const, label: 'Teams', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/bot', icon: Bot, key: 'bot' as const, label: 'Bot', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/bulk-messaging', icon: Megaphone, key: 'bulkMessaging' as const, label: 'Bulk Messaging', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/message-tester', icon: Send, key: 'messageTester' as const, label: 'Message Tester', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  { to: '/branding', icon: Palette, key: 'branding' as const, label: 'Branding', roles: ['super_admin', 'support_admin'] },
+  { to: '/infrastructure', icon: Server, key: 'infrastructure' as const, label: 'Infrastructure', roles: ['super_admin'] },
+  { to: '/plugins', icon: Puzzle, key: 'plugins' as const, label: 'Plugins', roles: ['super_admin'] },
+  { to: '/logs', icon: FileText, key: 'logs' as const, label: 'Logs', roles: ['super_admin', 'support_admin'] },
 ];
 
 const themeIcons = { light: Sun, dark: Moon, system: Monitor };
 
-export function Layout({ onLogout, userRole }: LayoutProps) {
+export function Layout({ onLogout, omegaRole }: LayoutProps) {
   const { t, i18n } = useTranslation();
   const { theme, toggleTheme } = useTheme();
   const branding = useBranding();
   const ThemeIcon = themeIcons[theme];
   const themeLabel = t(`theme.${theme}`);
 
-  const navItems = allNavItems.filter(item => !item.adminOnly || userRole === 'admin');
+  const navItems = allNavItems.filter(item => item.roles.includes(omegaRole));
 
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);

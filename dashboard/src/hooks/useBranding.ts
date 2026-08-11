@@ -15,7 +15,11 @@ export function useBranding() {
 
   useEffect(() => {
     applyFavicon(branding.faviconSrc);
-  }, [branding.faviconSrc]);
+    const currentTitle = document.title?.trim();
+    if (!currentTitle || currentTitle === 'OpenWA' || currentTitle === 'AuroraWA') {
+      document.title = branding.tabTitle;
+    }
+  }, [branding.faviconSrc, branding.tabTitle]);
 
   useEffect(() => {
     const syncBranding = () => {

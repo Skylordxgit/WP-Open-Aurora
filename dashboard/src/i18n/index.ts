@@ -7,14 +7,30 @@ import he from './locales/he.json';
 import zhCN from './locales/zh-CN.json';
 import zhHK from './locales/zh-HK.json';
 import ar from './locales/ar.json';
+import ur from './locales/ur.json';
+import hi from './locales/hi.json';
+import bn from './locales/bn.json';
 import te from './locales/te.json';
 import fr from './locales/fr.json';
 import it from './locales/it.json';
 
-export const supportedLanguages = ['en', 'es', 'he', 'zh-CN', 'zh-HK', 'ar', 'te', 'fr', 'it'] as const;
+export const supportedLanguages = [
+  'en',
+  'es',
+  'he',
+  'zh-CN',
+  'zh-HK',
+  'ar',
+  'ur',
+  'hi',
+  'bn',
+  'te',
+  'fr',
+  'it',
+] as const;
 export type SupportedLanguage = (typeof supportedLanguages)[number];
 
-export const rtlLanguages: SupportedLanguage[] = ['he', 'ar'];
+export const rtlLanguages: SupportedLanguage[] = ['he', 'ar', 'ur'];
 
 export const languageOptions: Array<{ value: SupportedLanguage; label: string; compactLabel: string }> = [
   { value: 'en', label: 'English', compactLabel: 'EN' },
@@ -23,6 +39,9 @@ export const languageOptions: Array<{ value: SupportedLanguage; label: string; c
   { value: 'zh-CN', label: '简体中文', compactLabel: '简中' },
   { value: 'zh-HK', label: '繁體中文', compactLabel: '繁中' },
   { value: 'ar', label: 'العربية', compactLabel: 'AR' },
+  { value: 'ur', label: 'اردو', compactLabel: 'UR' },
+  { value: 'hi', label: 'हिन्दी', compactLabel: 'HI' },
+  { value: 'bn', label: 'বাংলা', compactLabel: 'BN' },
   { value: 'te', label: 'తెలుగు', compactLabel: 'TE' },
   { value: 'fr', label: 'Français', compactLabel: 'FR' },
   { value: 'it', label: 'Italiano', compactLabel: 'IT' },
@@ -55,6 +74,9 @@ void i18n
       'zh-CN': { translation: zhCN },
       'zh-HK': { translation: zhHK },
       ar: { translation: ar },
+      ur: { translation: ur },
+      hi: { translation: hi },
+      bn: { translation: bn },
       te: { translation: te },
       fr: { translation: fr },
       it: { translation: it },

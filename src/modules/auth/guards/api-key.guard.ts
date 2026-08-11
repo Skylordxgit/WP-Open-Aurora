@@ -1,4 +1,4 @@
-import { Injectable, CanActivate, ExecutionContext, UnauthorizedException, ForbiddenException } from '@nestjs/common';
+import { Injectable, CanActivate, ExecutionContext, UnauthorizedException, ForbiddenException, Inject, forwardRef } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
@@ -13,6 +13,7 @@ import { OmegaAuthService } from '../../omega/omega-auth.service';
 export class ApiKeyGuard implements CanActivate {
   constructor(
     private readonly authService: AuthService,
+    @Inject(forwardRef(() => OmegaAuthService))
     private readonly omegaAuthService: OmegaAuthService,
     private readonly reflector: Reflector,
     private readonly configService: ConfigService,
@@ -46,50 +47,48 @@ export class ApiKeyGuard implements CanActivate {
     }
 
     if (bearerToken) {
-      try {
-        const { user } = await this.omegaAuthService.validateSessionToken(bearerToken);
-        if (!this.isOmegaAdmin(user.role)) {
-          throw new ForbiddenException('This Aurora account does not have admin panel access');
-        }
-
-        const syntheticApiKey = {
-          id: `omega:${user.id}`,
-          name: user.fullName,
-          keyHash: '',
-          keyPrefix: 'omega-session',
-          role: ApiKeyRole.ADMIN,
-          allowedIps: null,
-          allowedSessions: null,
-          isActive: true,
-          expiresAt: null,
-          lastUsedAt: user.lastLoginAt ?? null,
-          usageCount: 0,
-          createdAt: user.createdAt,
-          updatedAt: user.updatedAt,
-        };
-
-        if (requiredRole && !this.authService.hasPermission(syntheticApiKey, requiredRole)) {
-          throw new ForbiddenException(`Insufficient permissions. Required: ${requiredRole}`);
-        }
-
-        (
-          request as Request & {
-            apiKey: typeof syntheticApiKey;
-            omegaUser: typeof user;
-            omegaToken: string;
-          }
-        ).apiKey = syntheticApiKey;
-        (request as Request & { omegaUser: typeof user }).omegaUser = user;
-        (request as Request & { omegaToken: string }).omegaToken = bearerToken;
-
-        return true;
-      } catch (error) {
-        if (error instanceof ForbiddenException) {
-          throw error;
-        }
-
+      if (bearerToken.startsWith('owa_')) {
         return this.authorizeApiKey(request, bearerToken, clientIp, requiredRole);
       }
+
+      const { user } = await this.omegaAuthService.validateSessionToken(bearerToken);
+      if (!this.isOmegaAdmin(user.role)) {
+        throw new ForbiddenException('This Aurora account does not have admin panel access');
+      }
+
+      this.assertOmegaRouteAccess(request, user.role);
+
+      const syntheticApiKey = {
+        id: `omega:${user.id}`,
+        name: user.fullName,
+        keyHash: '',
+        keyPrefix: 'omega-session',
+        role: ApiKeyRole.ADMIN,
+        allowedIps: null,
+        allowedSessions: null,
+        isActive: true,
+        expiresAt: null,
+        lastUsedAt: user.lastLoginAt ?? null,
+        usageCount: 0,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+      };
+
+      if (requiredRole && !this.authService.hasPermission(syntheticApiKey, requiredRole)) {
+        throw new ForbiddenException(`Insufficient permissions. Required: ${requiredRole}`);
+      }
+
+      (
+        request as Request & {
+          apiKey: typeof syntheticApiKey;
+          omegaUser: typeof user;
+          omegaToken: string;
+        }
+      ).apiKey = syntheticApiKey;
+      (request as Request & { omegaUser: typeof user }).omegaUser = user;
+      (request as Request & { omegaToken: string }).omegaToken = bearerToken;
+
+      return true;
     }
 
     throw new UnauthorizedException('API key or Aurora session is required');
@@ -119,7 +118,27 @@ export class ApiKeyGuard implements CanActivate {
   }
 
   private isOmegaAdmin(role: OmegaUserRole): boolean {
-    return role === OmegaUserRole.SUPER_ADMIN || role === OmegaUserRole.SUPPORT_ADMIN;
+    return (
+      role === OmegaUserRole.SUPER_ADMIN ||
+      role === OmegaUserRole.SUPPORT_ADMIN ||
+      role === OmegaUserRole.CLIENT_ADMIN
+    );
+  }
+
+  private assertOmegaRouteAccess(request: Request, role: OmegaUserRole): void {
+    if (role === OmegaUserRole.SUPER_ADMIN) {
+      return;
+    }
+
+    const requestPath = `${request.originalUrl ?? request.url ?? ''}`.toLowerCase();
+    const isSensitivePath =
+      requestPath.startsWith('/api/auth/api-keys') ||
+      requestPath.startsWith('/api/infra') ||
+      requestPath.startsWith('/api/plugins');
+
+    if (isSensitivePath) {
+      throw new ForbiddenException('This Aurora role cannot access sensitive platform controls');
+    }
   }
 
   /**

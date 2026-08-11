@@ -1,4 +1,4 @@
-import { IsEmail, IsEnum, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsBoolean, IsEmail, IsEnum, IsOptional, IsString, MinLength } from 'class-validator';
 import { OmegaUserRole, OmegaUserStatus } from '../entities';
 
 export class CreateOmegaUserDto {
@@ -18,6 +18,10 @@ export class CreateOmegaUserDto {
   @IsOptional()
   @IsString()
   clientId?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  isOnDuty?: boolean;
 }
 
 export class UpdateOmegaUserDto {
@@ -45,4 +49,8 @@ export class UpdateOmegaUserDto {
   @IsOptional()
   @IsString()
   clientId?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  isOnDuty?: boolean;
 }

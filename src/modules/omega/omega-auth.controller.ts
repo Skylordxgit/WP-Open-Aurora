@@ -1,11 +1,11 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { SkipApiKeyAuth } from '../auth/decorators/auth.decorators';
 import { SendTextMessageDto } from '../message/dto';
 import { MarkChatReadDto } from '../session/dto';
 import { CurrentOmegaUser } from './decorators/omega-auth.decorators';
-import { OmegaLoginDto } from './dto';
+import { OmegaLoginDto, UpdateOmegaProfileDto } from './dto';
 import { OmegaUser } from './entities';
 import { OmegaAdminService } from './omega-admin.service';
 import { OmegaAuthGuard } from './guards/omega-auth.guard';
@@ -33,6 +33,7 @@ export class OmegaAuthController {
         role: user.role,
         clientId: user.clientId,
         status: user.status,
+        isOnDuty: user.isOnDuty,
       },
     };
   }
@@ -49,7 +50,30 @@ export class OmegaAuthController {
       clientId: user.clientId,
       companyName,
       status: user.status,
+      isOnDuty: user.isOnDuty,
       lastLoginAt: user.lastLoginAt,
+    };
+  }
+
+  @Patch('me')
+  @UseGuards(OmegaAuthGuard)
+  async updateMe(@CurrentOmegaUser() user: OmegaUser, @Body() dto: UpdateOmegaProfileDto) {
+    const updatedUser = await this.omegaAuthService.updateProfile(user.id, {
+      fullName: dto.fullName,
+      password: dto.password,
+      isOnDuty: dto.isOnDuty,
+    });
+    const companyName = await this.omegaAdminService.getClientCompanyName(updatedUser.clientId);
+    return {
+      id: updatedUser.id,
+      fullName: updatedUser.fullName,
+      email: updatedUser.email,
+      role: updatedUser.role,
+      clientId: updatedUser.clientId,
+      companyName,
+      status: updatedUser.status,
+      isOnDuty: updatedUser.isOnDuty,
+      lastLoginAt: updatedUser.lastLoginAt,
     };
   }
 

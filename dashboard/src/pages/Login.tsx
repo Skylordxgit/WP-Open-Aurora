@@ -51,8 +51,8 @@ export function Login({ onLogin }: LoginProps) {
       <div className="login-card">
         <div className="login-logo">
           <img src={branding.logoSrc} alt={branding.appName} className="logo-icon" />
-          <h1 className="login-title">{branding.loginTitle}</h1>
-          <p className="login-subtitle">{branding.loginSubtitle}</p>
+          {branding.loginTitle ? <h1 className="login-title">{branding.loginTitle}</h1> : null}
+          {branding.loginSubtitle ? <p className="login-subtitle">{branding.loginSubtitle}</p> : null}
           <span className="version-info">
             {t('login.version', {
               version: __APP_VERSION__,

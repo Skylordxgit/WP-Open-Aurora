@@ -83,7 +83,7 @@ export class OmegaAdminService implements OnModuleInit {
     });
   }
 
-  async getDashboardSummary() {
+  async getDashboardSummary(actor?: OmegaUser) {
     const [clients, plans, sessions, staff, campaigns, contacts, groups] = await Promise.all([
       this.clientRepository.find(),
       this.planRepository.find(),
@@ -93,8 +93,15 @@ export class OmegaAdminService implements OnModuleInit {
       this.contactRepository.find(),
       this.contactGroupRepository.find(),
     ]);
-    const usageOverview = await this.omegaUsageService.buildUsageOverview(clients, sessions);
-    const clientsById = new Map(clients.map(client => [client.id, client]));
+    const scopedClients = this.scopeClientsForActor(clients, actor);
+    const scopedClientIds = new Set(scopedClients.map(client => client.id));
+    const scopedSessions = this.scopeSessionsForActor(sessions, actor, scopedClientIds);
+    const scopedStaff = this.scopeUsersForActor(staff, actor);
+    const scopedCampaigns = this.scopeRecordsByClientId(campaigns, scopedClientIds);
+    const scopedContacts = this.scopeRecordsByClientId(contacts, scopedClientIds);
+    const scopedGroups = this.scopeRecordsByClientId(groups, scopedClientIds);
+    const usageOverview = await this.omegaUsageService.buildUsageOverview(scopedClients, scopedSessions);
+    const clientsById = new Map(scopedClients.map(client => [client.id, client]));
     const topClients = [...usageOverview.perClient]
       .sort((a, b) => b.messagesThisMonth - a.messagesThisMonth)
       .slice(0, 5)
@@ -107,26 +114,25 @@ export class OmegaAdminService implements OnModuleInit {
     return {
       brandName: 'Aurora WA API',
       stats: {
-        totalClients: clients.length,
-        activeClients: clients.filter(client => client.status === OmegaClientStatus.ACTIVE).length,
-        suspendedClients: clients.filter(client => client.status === OmegaClientStatus.SUSPENDED).length,
+        totalClients: scopedClients.length,
+        activeClients: scopedClients.filter(client => client.status === OmegaClientStatus.ACTIVE).length,
+        suspendedClients: scopedClients.filter(client => client.status === OmegaClientStatus.SUSPENDED).length,
         plans: plans.length,
-        totalSessions: sessions.length,
-        connectedSessions: sessions.filter(session => session.status === OmegaSessionStatus.CONNECTED).length,
-        reconnectSessions: sessions.filter(session => session.status === OmegaSessionStatus.NEEDS_RECONNECT).length,
-        unassignedSessions: sessions.filter(session => !session.clientId).length,
+        totalSessions: scopedSessions.length,
+        connectedSessions: scopedSessions.filter(session => session.status === OmegaSessionStatus.CONNECTED).length,
+        reconnectSessions: scopedSessions.filter(session => session.status === OmegaSessionStatus.NEEDS_RECONNECT).length,
+        unassignedSessions: scopedSessions.filter(session => !session.clientId).length,
         messagesThisMonth: usageOverview.totals.messagesThisMonth,
         messagesToday: usageOverview.totals.messagesToday,
-        staffCount: staff.filter(user => [OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN].includes(user.role))
-          .length,
-        contactCount: contacts.length,
-        contactGroupCount: groups.length,
-        campaigns: campaigns.length,
+        staffCount: scopedStaff.length,
+        contactCount: scopedContacts.length,
+        contactGroupCount: scopedGroups.length,
+        campaigns: scopedCampaigns.length,
       },
       monthlyTrend: usageOverview.trend.map(point => ({ ...point, reconnects: 0 })),
       usageFallbackUsed: usageOverview.fallbackUsed,
       topClients,
-      reconnectQueue: sessions
+      reconnectQueue: scopedSessions
         .filter(session => session.status === OmegaSessionStatus.NEEDS_RECONNECT)
         .map(session => ({
           id: session.id,
@@ -139,7 +145,7 @@ export class OmegaAdminService implements OnModuleInit {
     };
   }
 
-  async listClients() {
+  async listClients(actor?: OmegaUser) {
     const [clients, plans, sessions, subscriptions, users] = await Promise.all([
       this.clientRepository.find({ order: { createdAt: 'DESC' } }),
       this.planRepository.find(),
@@ -147,15 +153,19 @@ export class OmegaAdminService implements OnModuleInit {
       this.subscriptionRepository.find(),
       this.userRepository.find(),
     ]);
-    const usageOverview = await this.omegaUsageService.buildUsageOverview(clients, sessions);
+    const scopedClients = this.scopeClientsForActor(clients, actor);
+    const scopedClientIds = new Set(scopedClients.map(client => client.id));
+    const scopedSessions = this.scopeSessionsForActor(sessions, actor, scopedClientIds);
+    const scopedUsers = this.scopeUsersForActor(users, actor);
+    const usageOverview = await this.omegaUsageService.buildUsageOverview(scopedClients, scopedSessions);
 
-    return clients.map(client => {
+    return scopedClients.map(client => {
       const plan = plans.find(item => item.id === client.planId) ?? null;
-      const clientSessions = sessions.filter(session => session.clientId === client.id);
+      const clientSessions = scopedSessions.filter(session => session.clientId === client.id);
       const subscription = subscriptions.find(item => item.clientId === client.id) ?? null;
       const usageThisMonth =
         usageOverview.perClient.find(entry => entry.clientId === client.id)?.messagesThisMonth ?? 0;
-      const clientUsers = users.filter(user => user.clientId === client.id);
+      const clientUsers = scopedUsers.filter(user => user.clientId === client.id);
 
       return {
         ...client,
@@ -169,17 +179,14 @@ export class OmegaAdminService implements OnModuleInit {
     });
   }
 
-  async getClientById(id: string) {
-    const client = await this.clientRepository.findOne({ where: { id } });
-    if (!client) {
-      throw new NotFoundException('Client not found');
-    }
+  async getClientById(id: string, actor?: OmegaUser) {
+    const client = await this.getClientEntity(id, actor);
 
     const [plan, subscription, sessions, usage, users, messages, contacts, contactGroups] = await Promise.all([
       client.planId ? this.planRepository.findOne({ where: { id: client.planId } }) : null,
       this.subscriptionRepository.findOne({ where: { clientId: client.id } }),
-      this.getClientSessions(client.id),
-      this.getClientUsage(client.id),
+      this.getClientSessions(client.id, actor),
+      this.getClientUsage(client.id, actor),
       this.userRepository.find({ where: { clientId: client.id }, order: { createdAt: 'DESC' } }),
       this.messageRepository.find({ where: { clientId: client.id }, order: { createdAt: 'DESC' }, take: 10 }),
       this.contactRepository.find({ where: { clientId: client.id } }),
@@ -193,7 +200,7 @@ export class OmegaAdminService implements OnModuleInit {
       sessions,
       usageSummary: usage.trend,
       usageStats: usage,
-      staff: users,
+      staff: this.scopeUsersForActor(users, actor),
       recentMessages: messages,
       contactsCount: contacts.length,
       contactGroupsCount: contactGroups.length,
@@ -291,10 +298,11 @@ export class OmegaAdminService implements OnModuleInit {
     return plan;
   }
 
-  async listSessions(filters: { status?: string; clientId?: string } = {}) {
-    await this.syncSessions();
-    const clients = await this.clientRepository.find();
-    const sessions = await this.listSessionEntities(filters);
+  async listSessions(filters: { status?: string; clientId?: string } = {}, actor?: OmegaUser) {
+    await this.syncSessions(actor);
+    const clients = this.scopeClientsForActor(await this.clientRepository.find(), actor);
+    const scopedClientIds = new Set(clients.map(client => client.id));
+    const sessions = this.scopeSessionsForActor(await this.listSessionEntities(filters), actor, scopedClientIds);
     const clientsById = new Map(clients.map(client => [client.id, client]));
 
     return sessions.map(session => ({
@@ -303,7 +311,7 @@ export class OmegaAdminService implements OnModuleInit {
     }));
   }
 
-  async assignSession(id: string, dto: AssignOmegaSessionDto, actorRole: OmegaUserRole) {
+  async assignSession(id: string, dto: AssignOmegaSessionDto, actor: OmegaUser) {
     const session = await this.sessionRepository.findOne({ where: { id } });
     if (!session) {
       throw new NotFoundException('WhatsApp session not found');
@@ -313,11 +321,14 @@ export class OmegaAdminService implements OnModuleInit {
       throw new BadRequestException('clientId is required for assignment');
     }
 
-    const client = await this.getClientEntity(dto.clientId);
+    const client = await this.getClientEntity(dto.clientId, actor);
+    if (actor.role === OmegaUserRole.CLIENT_ADMIN && actor.clientId !== client.id) {
+      throw new ForbiddenException('Sub admin can only assign sessions inside the same workspace');
+    }
     const clientSessions = await this.sessionRepository.find({ where: { clientId: client.id } });
     const isNewAssignment = session.clientId !== client.id;
     if (clientSessions.length >= client.whatsappAccountLimit && isNewAssignment) {
-      if (dto.overrideLimit && actorRole !== OmegaUserRole.SUPER_ADMIN) {
+      if (dto.overrideLimit && actor.role !== OmegaUserRole.SUPER_ADMIN) {
         throw new ForbiddenException('Only super_admin can override the WhatsApp account limit');
       }
       if (!dto.overrideLimit) {
@@ -334,11 +345,12 @@ export class OmegaAdminService implements OnModuleInit {
     return this.decorateSession(session);
   }
 
-  async unassignSession(id: string) {
+  async unassignSession(id: string, actor?: OmegaUser) {
     const session = await this.sessionRepository.findOne({ where: { id } });
     if (!session) {
       throw new NotFoundException('WhatsApp session not found');
     }
+    this.assertSessionAccess(session, actor);
 
     session.clientId = null;
     session.assignedToClient = false;
@@ -346,32 +358,38 @@ export class OmegaAdminService implements OnModuleInit {
     return this.decorateSession(session);
   }
 
-  async updateReplacementFlag(id: string, replacementRequested: boolean) {
+  async updateReplacementFlag(id: string, replacementRequested: boolean, actor?: OmegaUser) {
     const session = await this.sessionRepository.findOne({ where: { id } });
     if (!session) {
       throw new NotFoundException('WhatsApp session not found');
     }
+    this.assertSessionAccess(session, actor);
     session.replacementRequested = replacementRequested;
     await this.sessionRepository.save(session);
     return this.decorateSession(session);
   }
 
-  async listUsers() {
+  async listUsers(actor?: OmegaUser) {
     const [users, clients] = await Promise.all([
       this.userRepository.find({ order: { createdAt: 'DESC' } }),
       this.clientRepository.find(),
     ]);
     const clientsById = new Map(clients.map(client => [client.id, client.companyName]));
 
-    return users.map(user => ({
+    const scopedUsers = this.scopeUsersForActor(users, actor);
+    return scopedUsers.map(user => ({
       ...user,
       companyName: user.clientId ? (clientsById.get(user.clientId) ?? null) : null,
+      isOnDuty: user.isOnDuty,
     }));
   }
 
-  async createUser(dto: CreateOmegaUserDto) {
-    if (dto.clientId) {
-      await this.getClientEntity(dto.clientId);
+  async createUser(dto: CreateOmegaUserDto, actor: OmegaUser) {
+    this.assertUserRoleAssignment(actor, dto.role);
+    const resolvedClientId =
+      actor.role === OmegaUserRole.CLIENT_ADMIN ? (actor.clientId ?? null) : (dto.clientId ?? null);
+    if (resolvedClientId) {
+      await this.getClientEntity(resolvedClientId, actor);
     }
 
     return this.userRepository.save(
@@ -381,19 +399,32 @@ export class OmegaAdminService implements OnModuleInit {
         passwordHash: this.omegaAuthService.hashPassword(dto.password),
         role: dto.role,
         status: OmegaUserStatus.ACTIVE,
-        clientId: dto.clientId ?? null,
+        clientId: resolvedClientId,
+        isOnDuty: dto.isOnDuty ?? true,
       }),
     );
   }
 
-  async updateUser(id: string, dto: UpdateOmegaUserDto) {
+  async updateUser(id: string, dto: UpdateOmegaUserDto, actor: OmegaUser) {
     const user = await this.userRepository.findOne({ where: { id } });
     if (!user) {
       throw new NotFoundException('User not found');
     }
+    this.assertManageableUser(actor, user);
 
-    if (dto.clientId) {
-      await this.getClientEntity(dto.clientId);
+    if (dto.role) {
+      this.assertUserRoleAssignment(actor, dto.role);
+    }
+
+    const resolvedClientId =
+      actor.role === OmegaUserRole.CLIENT_ADMIN
+        ? (actor.clientId ?? null)
+        : dto.clientId !== undefined
+          ? dto.clientId
+          : user.clientId;
+
+    if (resolvedClientId) {
+      await this.getClientEntity(resolvedClientId, actor);
     }
 
     Object.assign(user, {
@@ -401,7 +432,8 @@ export class OmegaAdminService implements OnModuleInit {
       email: dto.email ? dto.email.toLowerCase() : user.email,
       role: dto.role ?? user.role,
       status: dto.status ?? user.status,
-      clientId: dto.clientId !== undefined ? dto.clientId : user.clientId,
+      clientId: resolvedClientId ?? null,
+      isOnDuty: dto.isOnDuty ?? user.isOnDuty,
     });
     if (dto.password) {
       user.passwordHash = this.omegaAuthService.hashPassword(dto.password);
@@ -485,13 +517,17 @@ export class OmegaAdminService implements OnModuleInit {
     return this.messageService.sendText(session.openwaSessionId, { chatId, text });
   }
 
-  async getUsageOverview() {
+  async getUsageOverview(actor?: OmegaUser) {
     const [clients, sessions, manualUsage] = await Promise.all([
       this.clientRepository.find(),
       this.listSessionEntities(),
       this.usageRepository.find({ order: { createdAt: 'DESC' } }),
     ]);
-    const usage = await this.omegaUsageService.buildUsageOverview(clients, sessions);
+    const scopedClients = this.scopeClientsForActor(clients, actor);
+    const scopedClientIds = new Set(scopedClients.map(client => client.id));
+    const scopedSessions = this.scopeSessionsForActor(sessions, actor, scopedClientIds);
+    const scopedManualUsage = this.scopeRecordsByClientId(manualUsage, scopedClientIds);
+    const usage = await this.omegaUsageService.buildUsageOverview(scopedClients, scopedSessions);
 
     return {
       currentMonth: usage.currentMonth,
@@ -499,7 +535,7 @@ export class OmegaAdminService implements OnModuleInit {
       totals: {
         messagesToday: usage.totals.messagesToday,
         messagesThisMonth: usage.totals.messagesThisMonth,
-        reconnections: manualUsage
+        reconnections: scopedManualUsage
           .filter(
             entry => entry.periodMonth === usage.currentMonth && entry.metricType === OmegaUsageMetricType.RECONNECT,
           )
@@ -507,7 +543,7 @@ export class OmegaAdminService implements OnModuleInit {
       },
       perClient: usage.perClient.map(client => ({
         ...client,
-        sessionCount: sessions.filter(session => session.clientId === client.clientId).length,
+        sessionCount: scopedSessions.filter(session => session.clientId === client.clientId).length,
       })),
       trend: usage.trend.map(point => ({ ...point, reconnects: 0 })),
       bySession: usage.bySession,
@@ -515,8 +551,8 @@ export class OmegaAdminService implements OnModuleInit {
     };
   }
 
-  async getClientUsage(clientId: string) {
-    const client = await this.getClientEntity(clientId);
+  async getClientUsage(clientId: string, actor?: OmegaUser) {
+    const client = await this.getClientEntity(clientId, actor);
     const sessions = await this.getClientSessionEntities(clientId);
     return this.omegaUsageService.buildClientUsage(client, sessions);
   }
@@ -552,7 +588,7 @@ export class OmegaAdminService implements OnModuleInit {
     };
   }
 
-  async syncSessions() {
+  async syncSessions(actor?: OmegaUser) {
     const snapshots = await this.openwaApiClientService.listSessions();
     const existing = await this.sessionRepository.find();
     const existingByOpenwaId = new Map(existing.map(session => [session.openwaSessionId, session]));
@@ -595,16 +631,18 @@ export class OmegaAdminService implements OnModuleInit {
     }
 
     const sessions = await this.listSessionEntities();
-    const clients = await this.clientRepository.find();
+    const clients = this.scopeClientsForActor(await this.clientRepository.find(), actor);
+    const scopedClientIds = new Set(clients.map(client => client.id));
+    const scopedSessions = this.scopeSessionsForActor(sessions, actor, scopedClientIds);
     const clientsById = new Map(clients.map(client => [client.id, client]));
-    return sessions.map(session => ({
+    return scopedSessions.map(session => ({
       ...session,
       companyName: session.clientId ? (clientsById.get(session.clientId)?.companyName ?? null) : null,
     }));
   }
 
-  async getClientSessions(clientId: string) {
-    await this.getClientEntity(clientId);
+  async getClientSessions(clientId: string, actor?: OmegaUser) {
+    await this.getClientEntity(clientId, actor);
     const sessions = await this.getClientSessionEntities(clientId);
     return Promise.all(sessions.map(session => this.decorateSession(session)));
   }
@@ -831,10 +869,13 @@ export class OmegaAdminService implements OnModuleInit {
     }
   }
 
-  private async getClientEntity(id: string) {
+  private async getClientEntity(id: string, actor?: OmegaUser) {
     const client = await this.clientRepository.findOne({ where: { id } });
     if (!client) {
       throw new NotFoundException('Client not found');
+    }
+    if (actor?.role === OmegaUserRole.CLIENT_ADMIN && actor.clientId !== client.id) {
+      throw new ForbiddenException('Sub admin can only access the assigned workspace');
     }
     return client;
   }
@@ -903,5 +944,111 @@ export class OmegaAdminService implements OnModuleInit {
           .reduce((sum, entry) => sum + entry.units, 0),
       };
     });
+  }
+
+  private scopeClientsForActor(clients: OmegaClient[], actor?: OmegaUser) {
+    if (actor?.role !== OmegaUserRole.CLIENT_ADMIN) {
+      return clients;
+    }
+    return clients.filter(client => client.id === actor.clientId);
+  }
+
+  private scopeUsersForActor(users: OmegaUser[], actor?: OmegaUser) {
+    if (!actor) {
+      return users;
+    }
+
+    if (actor.role === OmegaUserRole.SUPER_ADMIN) {
+      return users;
+    }
+
+    if (actor.role === OmegaUserRole.SUPPORT_ADMIN) {
+      return users.filter(user => user.role !== OmegaUserRole.SUPER_ADMIN);
+    }
+
+    if (actor.role === OmegaUserRole.CLIENT_ADMIN) {
+      return users.filter(
+        user =>
+          user.clientId === actor.clientId &&
+          user.role !== OmegaUserRole.SUPER_ADMIN &&
+          user.role !== OmegaUserRole.SUPPORT_ADMIN,
+      );
+    }
+
+    return [];
+  }
+
+  private scopeSessionsForActor(
+    sessions: OmegaWhatsappSession[],
+    actor?: OmegaUser,
+    scopedClientIds?: Set<string>,
+  ) {
+    if (actor?.role !== OmegaUserRole.CLIENT_ADMIN) {
+      return sessions;
+    }
+
+    return sessions.filter(session => {
+      if (!session.clientId || !actor.clientId) {
+        return false;
+      }
+      return scopedClientIds ? scopedClientIds.has(session.clientId) : session.clientId === actor.clientId;
+    });
+  }
+
+  private scopeRecordsByClientId<T extends { clientId: string | null }>(records: T[], scopedClientIds: Set<string>) {
+    return records.filter(record => !!record.clientId && scopedClientIds.has(record.clientId));
+  }
+
+  private assertUserRoleAssignment(actor: OmegaUser, targetRole: OmegaUserRole) {
+    if (actor.role === OmegaUserRole.SUPER_ADMIN) {
+      return;
+    }
+
+    if (actor.role === OmegaUserRole.SUPPORT_ADMIN) {
+      if (targetRole === OmegaUserRole.SUPER_ADMIN) {
+        throw new ForbiddenException('Admin cannot create or promote a Super Admin');
+      }
+      return;
+    }
+
+    if (actor.role === OmegaUserRole.CLIENT_ADMIN) {
+      if (![OmegaUserRole.CLIENT_ADMIN, OmegaUserRole.CLIENT_AGENT].includes(targetRole)) {
+        throw new ForbiddenException('Sub admin can only create or manage sub admin and employee roles');
+      }
+      return;
+    }
+
+    throw new ForbiddenException('This role cannot manage users');
+  }
+
+  private assertManageableUser(actor: OmegaUser, target: OmegaUser) {
+    if (actor.role === OmegaUserRole.SUPER_ADMIN) {
+      return;
+    }
+
+    if (actor.role === OmegaUserRole.SUPPORT_ADMIN) {
+      if (target.role === OmegaUserRole.SUPER_ADMIN) {
+        throw new ForbiddenException('Admin cannot manage Super Admin accounts');
+      }
+      return;
+    }
+
+    if (actor.role === OmegaUserRole.CLIENT_ADMIN) {
+      if (target.clientId !== actor.clientId) {
+        throw new ForbiddenException('Sub admin can only manage users in the assigned workspace');
+      }
+      if (![OmegaUserRole.CLIENT_ADMIN, OmegaUserRole.CLIENT_AGENT].includes(target.role)) {
+        throw new ForbiddenException('Sub admin can only manage sub admin and employee roles');
+      }
+      return;
+    }
+
+    throw new ForbiddenException('This role cannot manage users');
+  }
+
+  private assertSessionAccess(session: OmegaWhatsappSession, actor?: OmegaUser) {
+    if (actor?.role === OmegaUserRole.CLIENT_ADMIN && actor.clientId !== session.clientId) {
+      throw new ForbiddenException('Sub admin can only manage sessions in the assigned workspace');
+    }
   }
 }

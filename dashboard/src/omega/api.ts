@@ -8,6 +8,7 @@ export interface OmegaUser {
   email: string;
   role: OmegaRole;
   status: 'active' | 'inactive';
+  isOnDuty: boolean;
   clientId?: string | null;
   companyName?: string | null;
   lastLoginAt?: string | null;
@@ -241,6 +242,8 @@ export interface OmegaSettings {
 const OMEGA_TOKEN_KEY = 'omega_admin_token';
 const OPENWA_API_KEY_STORAGE_KEY = 'openwa_api_key';
 
+type OmegaRequestError = Error & { status?: number };
+
 export function getOmegaToken() {
   return sessionStorage.getItem(OMEGA_TOKEN_KEY);
 }
@@ -251,6 +254,7 @@ export function setOmegaToken(token: string) {
 
 export function clearOmegaToken() {
   sessionStorage.removeItem(OMEGA_TOKEN_KEY);
+  localStorage.removeItem('omega_user_role');
 }
 
 function getOpenwaApiKey() {
@@ -285,10 +289,27 @@ async function omegaFetch<T>(path: string, init?: RequestInit): Promise<T> {
         : Array.isArray(payload?.message)
           ? payload.message.join(', ')
           : `Request failed (${response.status})`;
-    throw new Error(message);
+    const error = new Error(message) as OmegaRequestError;
+    error.status = response.status;
+    throw error;
   }
 
   return (await parseJson(response)) as T;
+}
+
+export function isOmegaAuthError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const status = (error as OmegaRequestError).status;
+  return (
+    status === 401 ||
+    status === 403 ||
+    /session has expired|admin token|api key is required|invalid aurora credentials|aurora user is unavailable/i.test(
+      error.message,
+    )
+  );
 }
 
 export async function omegaLogin(email: string, password: string) {
@@ -304,6 +325,13 @@ export async function omegaLogout() {
 
 export async function omegaMe() {
   return omegaFetch<OmegaUser>('/auth/me');
+}
+
+export async function omegaUpdateMe(fullName: string, password?: string, isOnDuty?: boolean) {
+  return omegaFetch<OmegaUser>('/auth/me', {
+    method: 'PATCH',
+    body: JSON.stringify({ fullName, ...(password ? { password } : {}), ...(isOnDuty !== undefined ? { isOnDuty } : {}) }),
+  });
 }
 
 export async function omegaWorkspace() {
@@ -335,6 +363,7 @@ export async function omegaWorkspaceSendText(sessionId: string, chatId: string, 
 
 export const omegaApi = {
   me: omegaMe,
+  updateMe: omegaUpdateMe,
   workspace: omegaWorkspace,
   workspaceMessages: omegaWorkspaceMessages,
   workspaceMarkRead: omegaWorkspaceMarkRead,

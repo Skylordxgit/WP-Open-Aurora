@@ -25,15 +25,15 @@ export class OmegaAdminController {
   constructor(private readonly omegaAdminService: OmegaAdminService) {}
 
   @Get('admin/dashboard')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  getDashboard() {
-    return this.omegaAdminService.getDashboardSummary();
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  getDashboard(@CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.getDashboardSummary(user);
   }
 
   @Get('usage')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  getUsage() {
-    return this.omegaAdminService.getUsageOverview();
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  getUsage(@CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.getUsageOverview(user);
   }
 
   @Get('admin/settings')
@@ -43,9 +43,9 @@ export class OmegaAdminController {
   }
 
   @Get('clients')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  listClients() {
-    return this.omegaAdminService.listClients();
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  listClients(@CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.listClients(user);
   }
 
   @Post('clients')
@@ -55,21 +55,21 @@ export class OmegaAdminController {
   }
 
   @Get('clients/:id')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  getClient(@Param('id') id: string) {
-    return this.omegaAdminService.getClientById(id);
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  getClient(@Param('id') id: string, @CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.getClientById(id, user);
   }
 
   @Get('clients/:clientId/sessions')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  getClientSessions(@Param('clientId') clientId: string) {
-    return this.omegaAdminService.getClientSessions(clientId);
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  getClientSessions(@Param('clientId') clientId: string, @CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.getClientSessions(clientId, user);
   }
 
   @Get('clients/:clientId/usage')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  getClientUsage(@Param('clientId') clientId: string) {
-    return this.omegaAdminService.getClientUsage(clientId);
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  getClientUsage(@Param('clientId') clientId: string, @CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.getClientUsage(clientId, user);
   }
 
   @Patch('clients/:id')
@@ -97,50 +97,50 @@ export class OmegaAdminController {
   }
 
   @Get('sessions')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  listSessions(@Query('status') status?: string, @Query('clientId') clientId?: string) {
-    return this.omegaAdminService.listSessions({ status, clientId });
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  listSessions(@CurrentOmegaUser() user: OmegaUser, @Query('status') status?: string, @Query('clientId') clientId?: string) {
+    return this.omegaAdminService.listSessions({ status, clientId }, user);
   }
 
   @Post('sessions/sync')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  syncSessions() {
-    return this.omegaAdminService.syncSessions();
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  syncSessions(@CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.syncSessions(user);
   }
 
   @Post('sessions/:id/assign')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
   assignSession(@Param('id') id: string, @Body() dto: AssignOmegaSessionDto, @CurrentOmegaUser() user: OmegaUser) {
-    return this.omegaAdminService.assignSession(id, dto, user.role);
+    return this.omegaAdminService.assignSession(id, dto, user);
   }
 
   @Post('sessions/:id/unassign')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  unassignSession(@Param('id') id: string) {
-    return this.omegaAdminService.unassignSession(id);
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  unassignSession(@Param('id') id: string, @CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.unassignSession(id, user);
   }
 
   @Patch('sessions/:id/replacement')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  updateReplacement(@Param('id') id: string, @Body() dto: UpdateOmegaSessionReplacementDto) {
-    return this.omegaAdminService.updateReplacementFlag(id, dto.replacementRequested);
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  updateReplacement(@Param('id') id: string, @Body() dto: UpdateOmegaSessionReplacementDto, @CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.updateReplacementFlag(id, dto.replacementRequested, user);
   }
 
   @Get('users')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
-  listUsers() {
-    return this.omegaAdminService.listUsers();
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  listUsers(@CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.listUsers(user);
   }
 
   @Post('users')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN)
-  createUser(@Body() dto: CreateOmegaUserDto) {
-    return this.omegaAdminService.createUser(dto);
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  createUser(@Body() dto: CreateOmegaUserDto, @CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.createUser(dto, user);
   }
 
   @Patch('users/:id')
-  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN)
-  updateUser(@Param('id') id: string, @Body() dto: UpdateOmegaUserDto) {
-    return this.omegaAdminService.updateUser(id, dto);
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  updateUser(@Param('id') id: string, @Body() dto: UpdateOmegaUserDto, @CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.updateUser(id, dto, user);
   }
 }

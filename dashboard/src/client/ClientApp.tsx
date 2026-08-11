@@ -1,11 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowUpDown,
   ChevronDown,
+  Filter,
   MessageCircleMore,
+  Monitor,
   Moon,
   RefreshCcw,
   Search,
   SendHorizontal,
+  Sun,
   Users,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -16,6 +20,8 @@ import { useTheme } from '../hooks/useTheme';
 import { languageOptions, resolveSupportedLanguage } from '../i18n';
 import {
   clearOmegaToken,
+  isOmegaAuthError,
+  omegaApi,
   omegaLogin,
   omegaLogout,
   omegaMe,
@@ -30,8 +36,29 @@ import {
 import './ClientApp.css';
 
 type ClientPortalUser = OmegaUser;
-type InboxFilter = 'all' | 'unread' | 'direct' | 'groups';
-const OFF_DUTY_STORAGE_KEY = 'aurora_user_off_duty';
+type InboxFilter = 'queue' | 'inbox' | 'groups';
+type InboxStatusFilter = 'all' | 'open' | 'closed';
+type InboxSort = 'latest' | 'oldest' | 'started_last' | 'started_first' | 'waiting_longest';
+type ChannelFilter = 'all' | 'whatsapp' | 'telegram';
+
+async function withOmegaSessionRetry<T>(operation: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (isOmegaAuthError(error) || attempt === attempts - 1) {
+        throw error;
+      }
+
+      await new Promise(resolve => window.setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Unable to refresh Aurora workspace');
+}
 
 function getUserPortalSession() {
   return sessionStorage.getItem('omega_admin_token');
@@ -42,7 +69,14 @@ function getChatKey(chat: OmegaWorkspaceChat) {
 }
 
 function formatRole(role: string) {
-  return role.replace(/_/g, ' ');
+  const roleLabels: Record<string, string> = {
+    super_admin: 'Super Admin',
+    support_admin: 'Admin',
+    client_admin: 'Sub Admin',
+    client_agent: 'Employee',
+  };
+
+  return roleLabels[role] ?? role.replace(/_/g, ' ');
 }
 
 function getInitials(name: string) {
@@ -81,7 +115,7 @@ export function ClientApp({
 }) {
   const { t, i18n } = useTranslation();
   const branding = useBranding();
-  const { resolvedTheme, toggleTheme } = useTheme();
+  const { theme, resolvedTheme, setTheme } = useTheme();
   const [user, setUser] = useState<ClientPortalUser | null>(null);
   const [workspace, setWorkspace] = useState<OmegaWorkspace | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
@@ -92,18 +126,100 @@ export function ClientApp({
   const [error, setError] = useState('');
   const [form, setForm] = useState({ email: '', password: '' });
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeFilter, setActiveFilter] = useState<InboxFilter>('all');
+  const [activeFilter, setActiveFilter] = useState<InboxFilter>('queue');
+  const [inboxStatusFilter, setInboxStatusFilter] = useState<InboxStatusFilter>('open');
+  const [inboxSort, setInboxSort] = useState<InboxSort>('started_first');
+  const [channelFilter, setChannelFilter] = useState<ChannelFilter>('all');
+  const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false);
+  const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
+  const [isChannelMenuOpen, setIsChannelMenuOpen] = useState(false);
   const [selectedChatKey, setSelectedChatKey] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageInput, setMessageInput] = useState('');
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isLanguageMenuOpen, setIsLanguageMenuOpen] = useState(false);
-  const [isOffDuty, setIsOffDuty] = useState(() => localStorage.getItem(OFF_DUTY_STORAGE_KEY) === 'true');
+  const [isUpdatingDuty, setIsUpdatingDuty] = useState(false);
+  const [profileForm, setProfileForm] = useState({ fullName: '', password: '' });
+  const [profileError, setProfileError] = useState('');
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const languageMenuRef = useRef<HTMLDivElement>(null);
+  const inboxControlsRef = useRef<HTMLDivElement>(null);
+  const profileMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    localStorage.setItem(OFF_DUTY_STORAGE_KEY, String(isOffDuty));
-  }, [isOffDuty]);
+    if (!user) {
+      setProfileForm({ fullName: '', password: '' });
+      return;
+    }
+
+    setProfileForm({ fullName: user.fullName, password: '' });
+  }, [user]);
+
+  useEffect(() => {
+    if (!isLanguageMenuOpen) return;
+
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!languageMenuRef.current?.contains(event.target as Node)) {
+        setIsLanguageMenuOpen(false);
+      }
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsLanguageMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [isLanguageMenuOpen]);
+
+  useEffect(() => {
+    if (!isProfileMenuOpen) return;
+
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!profileMenuRef.current?.contains(event.target as Node)) {
+        setIsProfileMenuOpen(false);
+      }
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsProfileMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [isProfileMenuOpen]);
+
+  useEffect(() => {
+    if (!isStatusMenuOpen && !isSortMenuOpen && !isChannelMenuOpen) return;
+
+    const closeMenus = (event: MouseEvent) => {
+      if (!inboxControlsRef.current?.contains(event.target as Node)) {
+        setIsStatusMenuOpen(false);
+        setIsSortMenuOpen(false);
+        setIsChannelMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', closeMenus);
+    return () => {
+      document.removeEventListener('mousedown', closeMenus);
+    };
+  }, [isChannelMenuOpen, isSortMenuOpen, isStatusMenuOpen]);
 
   const loadWorkspace = useCallback(async (silent = false) => {
     if (!silent) {
@@ -111,7 +227,7 @@ export function ClientApp({
     }
 
     try {
-      const currentWorkspace = await omegaWorkspace();
+      const currentWorkspace = await withOmegaSessionRetry(() => omegaWorkspace());
       setWorkspace(currentWorkspace);
       return currentWorkspace;
     } finally {
@@ -131,17 +247,22 @@ export function ClientApp({
       return;
     }
 
-    omegaMe()
+    withOmegaSessionRetry(() => omegaMe())
       .then(async currentUser => {
         setUser(currentUser);
         await loadWorkspace();
       })
-      .catch(() => {
-        clearOmegaToken();
-        setUser(null);
-        setWorkspace(null);
-        setMessages([]);
-        onLoggedOut?.();
+      .catch(error => {
+        if (isOmegaAuthError(error)) {
+          clearOmegaToken();
+          setUser(null);
+          setWorkspace(null);
+          setMessages([]);
+          onLoggedOut?.();
+          return;
+        }
+
+        setError(error instanceof Error ? error.message : 'Unable to restore your workspace');
       })
       .finally(() => {
         setIsCheckingSession(false);
@@ -174,19 +295,27 @@ export function ClientApp({
   const filteredChats = useMemo(() => {
     return workspaceChats
       .filter(chat => {
+        if (inboxStatusFilter === 'closed') return false;
         const matchesSearch =
           chat.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
           chat.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
           chat.sessionName.toLowerCase().includes(searchQuery.toLowerCase());
 
         if (!matchesSearch) return false;
-        if (activeFilter === 'unread') return chat.unreadCount > 0;
-        if (activeFilter === 'direct') return !chat.isGroup;
+        if (activeFilter === 'inbox') return !chat.isGroup;
         if (activeFilter === 'groups') return chat.isGroup;
         return true;
       })
-      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-  }, [activeFilter, searchQuery, workspaceChats]);
+      .sort((a, b) => {
+        if (inboxSort === 'oldest' || inboxSort === 'started_first') {
+          return (a.timestamp || 0) - (b.timestamp || 0);
+        }
+        if (inboxSort === 'waiting_longest') {
+          return (b.unreadCount || 0) - (a.unreadCount || 0) || (a.timestamp || 0) - (b.timestamp || 0);
+        }
+        return (b.timestamp || 0) - (a.timestamp || 0);
+      });
+  }, [activeFilter, inboxSort, inboxStatusFilter, searchQuery, workspaceChats]);
 
   useEffect(() => {
     if (!workspaceChats.length) {
@@ -282,9 +411,55 @@ export function ClientApp({
     onLoggedOut?.();
   };
 
+  const handleProfileSave = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!user) {
+      return;
+    }
+
+    setIsSavingProfile(true);
+    setProfileError('');
+
+    try {
+      const updatedUser = await omegaApi.updateMe(profileForm.fullName, profileForm.password);
+      setUser(updatedUser);
+      await loadWorkspace(true);
+      setProfileForm({ fullName: updatedUser.fullName, password: '' });
+      setIsProfileModalOpen(false);
+    } catch (saveError) {
+      setProfileError(saveError instanceof Error ? saveError.message : 'Unable to update profile');
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
+
+  const handleDutyToggle = async () => {
+    if (!user || isUpdatingDuty) {
+      return;
+    }
+
+    const nextDuty = !user.isOnDuty;
+    setIsUpdatingDuty(true);
+    setError('');
+
+    try {
+      const updatedUser = await omegaApi.updateMe(user.fullName, undefined, nextDuty);
+      setUser(updatedUser);
+      await loadWorkspace(true);
+    } catch (dutyError) {
+      if (isOmegaAuthError(dutyError)) {
+        await handleLogout();
+        return;
+      }
+      setError(dutyError instanceof Error ? dutyError.message : 'Unable to update duty status');
+    } finally {
+      setIsUpdatingDuty(false);
+    }
+  };
+
   const handleSend = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!activeChat || !messageInput.trim() || isSending || isOffDuty) {
+    if (!activeChat || !messageInput.trim() || isSending || !user?.isOnDuty) {
       return;
     }
 
@@ -319,12 +494,66 @@ export function ClientApp({
     }
   };
 
-  const totalUnread = workspaceChats.reduce((sum, chat) => sum + (chat.unreadCount || 0), 0);
-  const directChats = workspaceChats.filter(chat => !chat.isGroup).length;
+  const handleInboxRefresh = async () => {
+    setError('');
+
+    try {
+      const refreshedWorkspace = await loadWorkspace();
+
+      if (!activeChat) {
+        return;
+      }
+
+      const refreshedChat =
+        refreshedWorkspace.chats.find(chat => getChatKey(chat) === getChatKey(activeChat)) ??
+        activeChat;
+
+      await loadMessages(refreshedChat);
+    } catch (refreshError) {
+      if (isOmegaAuthError(refreshError)) {
+        await handleLogout();
+        return;
+      }
+
+      setError(refreshError instanceof Error ? refreshError.message : 'Unable to refresh the inbox');
+    }
+  };
+
+  const inboxChats = workspaceChats.filter(chat => !chat.isGroup).length;
   const groupChats = workspaceChats.filter(chat => chat.isGroup).length;
   const activeWorkspaceName = workspace?.companyName ?? user?.companyName ?? branding.appName;
   const currentLanguage = resolveSupportedLanguage(i18n.resolvedLanguage || i18n.language);
   const languageLabel = languageOptions.find(option => option.value === currentLanguage)?.compactLabel ?? 'EN';
+  const channelLabel =
+    channelFilter === 'whatsapp' ? 'WhatsApp' : channelFilter === 'telegram' ? 'Telegram' : 'All channels';
+  const inboxStatusLabel =
+    inboxStatusFilter === 'all' ? 'All' : inboxStatusFilter === 'open' ? 'Open' : 'Closed';
+  const inboxSortLabel =
+    inboxSort === 'latest'
+      ? 'Latest'
+      : inboxSort === 'oldest'
+        ? 'Oldest'
+        : inboxSort === 'started_last'
+          ? 'Started last'
+          : inboxSort === 'started_first'
+            ? 'Started first'
+            : 'Waiting longest';
+  const effectiveTheme = theme === 'system' ? resolvedTheme : theme;
+  const ThemeIcon = theme === 'system' ? Monitor : effectiveTheme === 'dark' ? Moon : Sun;
+  const themeLabel = theme === 'system' ? t('theme.system', { defaultValue: 'System' }) : effectiveTheme === 'dark' ? t('theme.dark', { defaultValue: 'Dark' }) : t('theme.light', { defaultValue: 'Light' });
+  const isOffDuty = !(user?.isOnDuty ?? true);
+
+  const handleThemeToggle = () => {
+    if (theme === 'dark') {
+      setTheme('light');
+      return;
+    }
+    if (theme === 'light') {
+      setTheme('system');
+      return;
+    }
+    setTheme('dark');
+  };
 
   if (isCheckingSession) {
     return (
@@ -405,7 +634,7 @@ export function ClientApp({
           <span>{t('clientPortal.liveChat', { defaultValue: 'Live chat' })}</span>
         </button>
 
-        <div className="client-language-menu">
+        <div className="client-language-menu" ref={languageMenuRef}>
           <button
             className="client-rail-action"
             type="button"
@@ -434,13 +663,13 @@ export function ClientApp({
           )}
         </div>
 
-        <button className="client-rail-action" type="button" onClick={toggleTheme}>
-          <Moon size={18} />
-          <span>{resolvedTheme === 'dark' ? t('theme.dark', { defaultValue: 'Dark' }) : t('theme.light', { defaultValue: 'Light' })}</span>
+        <button className="client-rail-action" type="button" onClick={handleThemeToggle}>
+          <ThemeIcon size={18} />
+          <span>{themeLabel}</span>
         </button>
 
         <div className="client-rail-profile-area">
-          <div className="client-profile-menu-wrap client-profile-menu-wrap-sidebar">
+          <div className="client-profile-menu-wrap client-profile-menu-wrap-sidebar" ref={profileMenuRef}>
             <button className="client-profile-trigger" type="button" onClick={() => setIsProfileMenuOpen(open => !open)}>
               <div className="client-profile-avatar">{getInitials(user.fullName)}</div>
               <div className="client-profile-trigger-copy">
@@ -460,7 +689,8 @@ export function ClientApp({
                   <button
                     className={`client-duty-toggle ${isOffDuty ? 'active' : ''}`}
                     type="button"
-                    onClick={() => setIsOffDuty(value => !value)}
+                    onClick={() => void handleDutyToggle()}
+                    disabled={isUpdatingDuty}
                   >
                     <span />
                   </button>
@@ -501,28 +731,20 @@ export function ClientApp({
         <div className="client-queues-section">
           <p className="client-queues-label">{t('clientPortal.directs', { defaultValue: 'Directs' })}</p>
           <button
-            className={`client-queue-item ${activeFilter === 'all' ? 'active' : ''}`}
+            className={`client-queue-item ${activeFilter === 'queue' ? 'active' : ''}`}
             type="button"
-            onClick={() => setActiveFilter('all')}
+            onClick={() => setActiveFilter('queue')}
           >
             <span>{t('clientPortal.inQueue', { defaultValue: 'In queue' })}</span>
             <strong>{workspaceChats.length}</strong>
           </button>
           <button
-            className={`client-queue-item ${activeFilter === 'unread' ? 'active' : ''}`}
+            className={`client-queue-item ${activeFilter === 'inbox' ? 'active' : ''}`}
             type="button"
-            onClick={() => setActiveFilter('unread')}
+            onClick={() => setActiveFilter('inbox')}
           >
             <span>{t('clientPortal.yourInbox', { defaultValue: 'Your inbox' })}</span>
-            <strong>{totalUnread}</strong>
-          </button>
-          <button
-            className={`client-queue-item ${activeFilter === 'direct' ? 'active' : ''}`}
-            type="button"
-            onClick={() => setActiveFilter('direct')}
-          >
-            <span>{t('clientPortal.directChats', { defaultValue: 'Direct chats' })}</span>
-            <strong>{directChats}</strong>
+            <strong>{inboxChats}</strong>
           </button>
           <button
             className={`client-queue-item ${activeFilter === 'groups' ? 'active' : ''}`}
@@ -558,21 +780,138 @@ export function ClientApp({
       </aside>
 
       <section className="client-inbox-listpane">
-        <header className="client-pane-header">
-          <div>
-            <h1>{t('clientPortal.liveChat', { defaultValue: 'Live chat' })}</h1>
-            <p>
-              {activeFilter === 'unread'
-                ? t('clientPortal.yourInbox', { defaultValue: 'Your inbox' })
-                : t('clientPortal.assignedOnly', { defaultValue: 'Assigned conversations only' })}
-            </p>
+        <div className="client-inbox-controls-shell" ref={inboxControlsRef}>
+        <header className="client-inbox-heading">
+          <div className="client-inbox-heading-copy">
+            <strong>{t('clientPortal.yourInbox', { defaultValue: 'Your inbox' })}</strong>
           </div>
+          <div className="client-inbox-control-menus">
+            <div className="client-inbox-menu-wrap">
+              <button
+                className="client-inline-menu-trigger"
+                type="button"
+                onClick={() => {
+                  setIsChannelMenuOpen(open => !open);
+                  setIsSortMenuOpen(false);
+                  setIsStatusMenuOpen(false);
+                }}
+              >
+                <span>{channelLabel}</span>
+                <ChevronDown size={14} />
+              </button>
+              {isChannelMenuOpen && (
+                <div className="client-inline-menu-list client-inline-menu-list-compact">
+                  {[
+                    ['all', 'All channels'],
+                    ['whatsapp', 'WhatsApp'],
+                    ['telegram', 'Telegram'],
+                  ].map(([value, label]) => (
+                    <button
+                      key={value}
+                      className={`client-inline-menu-item ${channelFilter === value ? 'active' : ''}`}
+                      type="button"
+                      onClick={() => {
+                        setChannelFilter(value as ChannelFilter);
+                        setIsChannelMenuOpen(false);
+                      }}
+                    >
+                      <strong>{label}</strong>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </header>
+
+        <div className="client-inbox-filterbar">
+          <div className="client-inbox-menu-wrap">
+            <button
+              className="client-inline-filter-trigger"
+              type="button"
+              onClick={() => {
+                setIsStatusMenuOpen(open => !open);
+                setIsSortMenuOpen(false);
+                setIsChannelMenuOpen(false);
+              }}
+            >
+              <Filter size={15} />
+              <span>{inboxStatusLabel}</span>
+            </button>
+            {isStatusMenuOpen && (
+              <div className="client-inline-menu-list">
+                {[
+                  ['all', 'All'],
+                  ['open', 'Open'],
+                  ['closed', 'Closed'],
+                ].map(([value, label]) => (
+                  <button
+                    key={value}
+                    className={`client-inline-menu-item ${inboxStatusFilter === value ? 'active' : ''}`}
+                    type="button"
+                    onClick={() => {
+                      setInboxStatusFilter(value as InboxStatusFilter);
+                      setIsStatusMenuOpen(false);
+                    }}
+                  >
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="client-inbox-menu-wrap">
+            <button
+              className="client-inline-filter-trigger"
+              type="button"
+              onClick={() => {
+                setIsSortMenuOpen(open => !open);
+                setIsStatusMenuOpen(false);
+                setIsChannelMenuOpen(false);
+              }}
+            >
+              <ArrowUpDown size={15} />
+              <span>{inboxSortLabel}</span>
+            </button>
+            {isSortMenuOpen && (
+              <div className="client-inline-menu-list">
+                <p className="client-inline-menu-title">Sort by</p>
+                {[
+                  ['latest', 'Latest'],
+                  ['oldest', 'Oldest'],
+                  ['started_last', 'Started last'],
+                  ['started_first', 'Started first'],
+                  ['waiting_longest', 'Waiting longest'],
+                ].map(([value, label]) => (
+                  <button
+                    key={value}
+                    className={`client-inline-menu-item ${inboxSort === value ? 'active' : ''}`}
+                    type="button"
+                    onClick={() => {
+                      setInboxSort(value as InboxSort);
+                      setIsSortMenuOpen(false);
+                    }}
+                  >
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="client-pane-actions">
-            <button className="client-refresh-button" type="button" onClick={() => void loadWorkspace()} disabled={isRefreshingWorkspace}>
+            <button
+              className="client-refresh-button"
+              type="button"
+              onClick={() => void handleInboxRefresh()}
+              disabled={isRefreshingWorkspace || loadingMessages}
+            >
               <RefreshCcw size={16} />
             </button>
           </div>
-        </header>
+        </div>
+        </div>
 
         <div className="client-searchbar">
           <Search size={16} />
@@ -584,21 +923,6 @@ export function ClientApp({
               defaultValue: 'Search chats, contacts, or sessions',
             })}
           />
-        </div>
-
-        <div className="client-inbox-toolbar">
-          <span>
-            {t('clientPortal.conversationsCount', {
-              count: filteredChats.length,
-              defaultValue: '{{count}} conversations',
-            })}
-          </span>
-          <span>
-            {t('clientPortal.activeSessionsCount', {
-              count: workspace?.stats.activeSessions ?? 0,
-              defaultValue: '{{count}} active WhatsApp sessions',
-            })}
-          </span>
         </div>
 
         <div className="client-chat-list">
@@ -629,18 +953,14 @@ export function ClientApp({
             ))
           ) : (
             <div className="client-empty-list">
+              <MessageCircleMore size={34} />
               <strong>{t('clientPortal.noConversations', { defaultValue: 'No conversations' })}</strong>
-              <p>
-                {t('clientPortal.noConversationsDesc', {
-                  defaultValue: 'Assigned chats will appear here once messages are available for this workspace.',
-                })}
-              </p>
             </div>
           )}
         </div>
       </section>
 
-      <section className="client-conversation-pane">
+      <section className={`client-conversation-pane ${!activeChat ? 'client-conversation-pane-empty' : ''}`}>
         {activeChat ? (
           <>
             <header className="client-pane-header client-conversation-header">
@@ -694,11 +1014,11 @@ export function ClientApp({
             </div>
 
             <form className="client-composer" onSubmit={handleSend}>
-              <textarea
-                value={messageInput}
-                onChange={event => setMessageInput(event.target.value)}
-                placeholder={
-                  isOffDuty
+                <textarea
+                  value={messageInput}
+                  onChange={event => setMessageInput(event.target.value)}
+                  placeholder={
+                    isOffDuty
                     ? t('clientPortal.offDutyReplyPlaceholder', {
                         defaultValue: 'You are off duty. Turn it on to reply.',
                       })
@@ -706,8 +1026,8 @@ export function ClientApp({
                 }
                 rows={3}
                 disabled={isOffDuty}
-              />
-              <button type="submit" disabled={isSending || !messageInput.trim() || isOffDuty}>
+                />
+                <button type="submit" disabled={isSending || !messageInput.trim() || isOffDuty}>
                 <SendHorizontal size={16} />
                 <span>
                   {isSending
@@ -723,11 +1043,6 @@ export function ClientApp({
             <strong>
               {t('clientPortal.selectConversation', { defaultValue: 'Select a conversation to start chatting' })}
             </strong>
-            <p>
-              {t('clientPortal.selectConversationDesc', {
-                defaultValue: 'Your assigned inbox will appear here, and replies will stay scoped to your workspace only.',
-              })}
-            </p>
           </div>
         )}
       </section>
@@ -741,11 +1056,15 @@ export function ClientApp({
                 {t('common.close', { defaultValue: 'Close' })}
               </button>
             </div>
-            <div className="client-profile-modal-body">
-              <div className="client-profile-field">
+            <form className="client-profile-modal-body" onSubmit={handleProfileSave}>
+              <label className="client-profile-field client-profile-field-editable">
                 <span>{t('clientPortal.fullName', { defaultValue: 'Full name' })}</span>
-                <strong>{user.fullName}</strong>
-              </div>
+                <input
+                  type="text"
+                  value={profileForm.fullName}
+                  onChange={event => setProfileForm(current => ({ ...current, fullName: event.target.value }))}
+                />
+              </label>
               <div className="client-profile-field">
                 <span>{t('clientPortal.email', { defaultValue: 'Email' })}</span>
                 <strong>{user.email}</strong>
@@ -758,6 +1077,15 @@ export function ClientApp({
                 <span>{t('clientPortal.workspace', { defaultValue: 'Workspace' })}</span>
                 <strong>{activeWorkspaceName}</strong>
               </div>
+              <label className="client-profile-field client-profile-field-editable">
+                <span>{t('common.password', { defaultValue: 'Password' })}</span>
+                <input
+                  type="password"
+                  value={profileForm.password}
+                  onChange={event => setProfileForm(current => ({ ...current, password: event.target.value }))}
+                  placeholder="Enter a new password"
+                />
+              </label>
               <div className="client-profile-field">
                 <span>{t('clientPortal.duty', { defaultValue: 'Duty' })}</span>
                 <strong>
@@ -766,7 +1094,13 @@ export function ClientApp({
                     : t('clientPortal.available', { defaultValue: 'Available' })}
                 </strong>
               </div>
-            </div>
+              {profileError && <div className="client-login-error">{profileError}</div>}
+              <div className="client-profile-modal-actions">
+                <button type="submit" className="client-login-button" disabled={isSavingProfile}>
+                  {isSavingProfile ? t('common.save', { defaultValue: 'Saving...' }) : t('common.save', { defaultValue: 'Save' })}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

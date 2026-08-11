@@ -63,6 +63,8 @@ uploads/
 *.bak
 *.tmp
 *.temp
+.npm-cache/
+src/.jest-cache/
 
 # Git worktrees
 .worktrees/

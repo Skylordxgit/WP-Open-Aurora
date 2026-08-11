@@ -80,6 +80,28 @@ export class OmegaAuthService implements OnModuleInit {
     await this.sessionRepository.delete({ tokenHash: this.hashToken(token) });
   }
 
+  async updateProfile(
+    userId: string,
+    updates: { fullName?: string; password?: string; isOnDuty?: boolean },
+  ): Promise<OmegaUser> {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new UnauthorizedException('Aurora user is unavailable');
+    }
+
+    if (updates.fullName !== undefined) {
+      user.fullName = updates.fullName;
+    }
+    if (updates.password) {
+      user.passwordHash = this.hashPassword(updates.password);
+    }
+    if (updates.isOnDuty !== undefined) {
+      user.isOnDuty = updates.isOnDuty;
+    }
+    await this.userRepository.save(user);
+    return user;
+  }
+
   private sessionTtlHours(): number {
     return this.configService.get<number>('omega.authSessionTtlHours', 12);
   }
@@ -129,6 +151,7 @@ export class OmegaAuthService implements OnModuleInit {
         passwordHash: this.hashPassword(password),
         role,
         status: OmegaUserStatus.ACTIVE,
+        isOnDuty: true,
       }),
     );
   }

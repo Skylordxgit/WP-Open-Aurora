@@ -372,6 +372,7 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     sessionStorage.removeItem('openwa_api_key');
     sessionStorage.removeItem(OMEGA_TOKEN_KEY);
     localStorage.removeItem('openwa_user_role');
+    localStorage.removeItem('omega_user_role');
     if (typeof window !== 'undefined') {
       window.location.assign('/');
       // The page is navigating away — halt this request's promise chain so callers neither

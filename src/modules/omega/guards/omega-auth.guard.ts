@@ -48,6 +48,7 @@ export class OmegaAuthGuard implements CanActivate {
       clientId: null,
       role: OmegaUserRole.SUPER_ADMIN,
       status: OmegaUserStatus.ACTIVE,
+      isOnDuty: true,
       lastLoginAt: apiKey.lastUsedAt ?? null,
       createdAt: apiKey.createdAt,
       updatedAt: apiKey.updatedAt,

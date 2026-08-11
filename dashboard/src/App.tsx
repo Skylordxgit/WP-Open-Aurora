@@ -9,6 +9,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import {
   clearOmegaToken,
   getOmegaToken,
+  isOmegaAuthError,
   omegaLogin,
   omegaLogout,
   omegaMe,
@@ -23,6 +24,14 @@ import './omega/styles/omega.css';
 function clearStoredApiKey() {
   localStorage.removeItem('openwa_api_key');
   sessionStorage.removeItem('openwa_api_key');
+}
+
+function setStoredOmegaRole(role: OmegaRole | null) {
+  if (role) {
+    localStorage.setItem('omega_user_role', role);
+    return;
+  }
+  localStorage.removeItem('omega_user_role');
 }
 
 const Login = lazy(() => import('./pages/Login').then(m => ({ default: m.Login })));
@@ -44,6 +53,7 @@ const OmegaClientForm = lazy(() => import('./omega/pages/OmegaClientForm').then(
 const OmegaClientDetails = lazy(() => import('./omega/pages/OmegaClientDetails').then(m => ({ default: m.OmegaClientDetails })));
 const OmegaStaff = lazy(() => import('./omega/pages/OmegaStaff').then(m => ({ default: m.OmegaStaff })));
 const OmegaTeams = lazy(() => import('./omega/pages/OmegaTeams').then(m => ({ default: m.OmegaTeams })));
+const OmegaBot = lazy(() => import('./omega/pages/OmegaBot').then(m => ({ default: m.OmegaBot })));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -55,8 +65,8 @@ const queryClient = new QueryClient({
   },
 });
 
-function isAdminOmegaRole(role: OmegaRole) {
-  return role === 'super_admin' || role === 'support_admin';
+function isDashboardOmegaRole(role: OmegaRole) {
+  return role === 'super_admin' || role === 'support_admin' || role === 'client_admin';
 }
 
 function mapOmegaRoleToDashboardRole(role: OmegaRole): UserRole {
@@ -69,10 +79,29 @@ function mapOmegaRoleToDashboardRole(role: OmegaRole): UserRole {
   return 'viewer';
 }
 
+async function withOmegaSessionRetry<T>(operation: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (isOmegaAuthError(error) || attempt === attempts - 1) {
+        throw error;
+      }
+
+      await new Promise(resolve => window.setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Unable to restore Aurora session');
+}
+
 function AppContent() {
   const [authUser, setAuthUser] = useState<OmegaUser | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
-  const { setRole, role } = useRole();
+  const { setRole } = useRole();
 
   const handleLogin = async (identifier: string, password: string) => {
     const result = await omegaLogin(identifier, password);
@@ -80,6 +109,7 @@ function AppContent() {
     const user = result.user ?? (await omegaMe());
     setAuthUser(user);
     setRole(mapOmegaRoleToDashboardRole(user.role));
+    setStoredOmegaRole(user.role);
     clearStoredApiKey();
   };
 
@@ -87,6 +117,7 @@ function AppContent() {
     void omegaLogout().catch(() => undefined);
     clearOmegaToken();
     clearStoredApiKey();
+    setStoredOmegaRole(null);
     setAuthUser(null);
     setRole(null);
   };
@@ -98,16 +129,20 @@ function AppContent() {
       return;
     }
 
-    omegaMe()
+    withOmegaSessionRetry(() => omegaMe())
       .then(user => {
         setAuthUser(user);
         setRole(mapOmegaRoleToDashboardRole(user.role));
+        setStoredOmegaRole(user.role);
         clearStoredApiKey();
       })
-      .catch(() => {
-        clearOmegaToken();
-        setAuthUser(null);
-        setRole(null);
+      .catch(error => {
+        if (isOmegaAuthError(error)) {
+          clearOmegaToken();
+          setStoredOmegaRole(null);
+          setAuthUser(null);
+          setRole(null);
+        }
       })
       .finally(() => {
         setIsCheckingSession(false);
@@ -132,34 +167,43 @@ function AppContent() {
     );
   }
 
-  const isAdmin = isAdminOmegaRole(authUser.role);
+  const isDashboardUser = isDashboardOmegaRole(authUser.role);
+  const canAccessApiKeys = authUser.role === 'super_admin';
+  const canAccessWorkspaces = authUser.role === 'super_admin' || authUser.role === 'support_admin';
+  const canAccessUsers = authUser.role === 'super_admin' || authUser.role === 'support_admin' || authUser.role === 'client_admin';
+  const canAccessTeams = canAccessUsers;
+  const canAccessBot = canAccessUsers;
+  const canAccessBranding = authUser.role === 'super_admin' || authUser.role === 'support_admin';
+  const canAccessInfrastructure = authUser.role === 'super_admin';
+  const canAccessPlugins = authUser.role === 'super_admin';
 
   return (
     <ToastProvider>
       <BrowserRouter>
         <Suspense fallback={loadingFallback}>
           <Routes>
-            {isAdmin ? (
-              <Route path="/" element={<Layout onLogout={handleLogout} userRole={role} />}>
+            {isDashboardUser ? (
+              <Route path="/" element={<Layout onLogout={handleLogout} omegaRole={authUser.role} />}>
                 <Route index element={<Dashboard />} />
                 <Route path="sessions" element={<Sessions />} />
                 <Route path="chats" element={<Chats />} />
                 <Route path="webhooks" element={<Webhooks />} />
                 <Route path="templates" element={<Templates />} />
                 <Route path="contacts" element={<Contacts />} />
-                {role === 'admin' && <Route path="api-keys" element={<ApiKeys />} />}
-                {role === 'admin' && <Route path="clients" element={<OmegaClients />} />}
-                {role === 'admin' && <Route path="clients/new" element={<OmegaClientForm />} />}
-                {role === 'admin' && <Route path="clients/:id" element={<OmegaClientDetails />} />}
-                {role === 'admin' && <Route path="clients/:id/edit" element={<OmegaClientForm />} />}
-                {role === 'admin' && <Route path="users" element={<OmegaStaff />} />}
-                {role === 'admin' && <Route path="teams" element={<OmegaTeams />} />}
+                {canAccessApiKeys && <Route path="api-keys" element={<ApiKeys />} />}
+                {canAccessWorkspaces && <Route path="clients" element={<OmegaClients />} />}
+                {canAccessWorkspaces && <Route path="clients/new" element={<OmegaClientForm />} />}
+                {canAccessWorkspaces && <Route path="clients/:id" element={<OmegaClientDetails />} />}
+                {canAccessWorkspaces && <Route path="clients/:id/edit" element={<OmegaClientForm />} />}
+                {canAccessUsers && <Route path="users" element={<OmegaStaff />} />}
+                {canAccessTeams && <Route path="teams" element={<OmegaTeams />} />}
+                {canAccessBot && <Route path="bot" element={<OmegaBot />} />}
                 <Route path="bulk-messaging" element={<BulkMessaging />} />
                 <Route path="logs" element={<Logs />} />
                 <Route path="message-tester" element={<MessageTester />} />
-                {role === 'admin' && <Route path="branding" element={<Branding />} />}
-                <Route path="infrastructure" element={<Infrastructure />} />
-                {role === 'admin' && <Route path="plugins" element={<Plugins />} />}
+                {canAccessBranding && <Route path="branding" element={<Branding />} />}
+                {canAccessInfrastructure && <Route path="infrastructure" element={<Infrastructure />} />}
+                {canAccessPlugins && <Route path="plugins" element={<Plugins />} />}
                 <Route path="app" element={<Navigate to="/" replace />} />
                 <Route path="workspace" element={<Navigate to="/" replace />} />
                 <Route path="*" element={<Navigate to="/" replace />} />

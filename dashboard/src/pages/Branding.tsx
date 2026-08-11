@@ -40,8 +40,8 @@ export function Branding() {
       },
       {
         title: 'Repo source asset',
-        path: 'docs/logo/openwa_logo.png',
-        description: 'Fallback file in the repo when no local browser override is saved.',
+        path: draft.logoSrc.startsWith('data:') ? 'Embedded from saved branding settings' : draft.logoSrc,
+        description: 'Shared fallback used whenever the live branding settings do not provide a newer asset.',
         icon: ImageIcon,
       },
     ],
@@ -82,13 +82,13 @@ export function Branding() {
 
   const handleSave = () => {
     saveBrandingConfig(draft);
-    toast.success('Branding saved', 'Your local branding changes are now applied in this browser.');
+    toast.success('Branding saved', 'Your branding changes are now applied across the available dashboards in this app.');
   };
 
   const handleReset = () => {
     resetBrandingConfig();
     setDraft(defaultBranding);
-    toast.info('Branding reset', 'The dashboard has been restored to the default local branding.');
+    toast.info('Branding reset', 'All dashboards in this app have been restored to the default branding.');
   };
 
   return (
@@ -99,12 +99,12 @@ export function Branding() {
         <div className="branding-hero-copy">
           <div className="branding-badge">
             <Palette size={16} />
-            <span>Local branding editor</span>
+            <span>Global branding editor</span>
           </div>
           <h2>Update the dashboard brand without editing code</h2>
           <p>
-            Changes saved here apply locally in this browser. You can upload a new logo, rename the app title, and
-            update the sidebar subtitle instantly.
+            Changes saved here update the shared app branding for the admin dashboard, employee workspace, login
+            screens, browser tab title, and favicon.
           </p>
         </div>
         <div className="branding-hero-preview">

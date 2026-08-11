@@ -25,6 +25,9 @@ export class OmegaUser {
   @Column({ type: 'varchar', length: 20, default: OmegaUserStatus.ACTIVE })
   status: OmegaUserStatus;
 
+  @Column({ type: 'boolean', default: true })
+  isOnDuty: boolean;
+
   @Column({ type: 'datetime', nullable: true })
   lastLoginAt: Date | null;
 

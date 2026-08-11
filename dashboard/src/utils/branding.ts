@@ -11,13 +11,15 @@ export interface BrandingConfig {
 const BRANDING_STORAGE_KEY = 'openwa_branding_config';
 export const BRANDING_UPDATED_EVENT = 'openwa:branding-updated';
 const DEFAULT_LOGO_SRC = '/openwa_logo.png';
+const LEGACY_LOGIN_TITLE = 'OpenWA Technical Dashboard';
+const LEGACY_LOGIN_SUBTITLE = 'Internal API key access for session control, logs, plugins, and engine tools.';
 
 export const defaultBranding: BrandingConfig = {
-  appName: 'OpenWA',
+  appName: 'AuroraWA',
   appSubtitle: 'WhatsApp API',
-  loginTitle: 'OpenWA Technical Dashboard',
-  loginSubtitle: 'Internal API key access for session control, logs, plugins, and engine tools.',
-  tabTitle: 'OpenWA',
+  loginTitle: 'Login',
+  loginSubtitle: '',
+  tabTitle: 'AuroraWA',
   logoSrc: DEFAULT_LOGO_SRC,
   faviconSrc: DEFAULT_LOGO_SRC,
 };
@@ -32,9 +34,24 @@ export function getBrandingConfig(): BrandingConfig {
     if (!raw) return defaultBranding;
     const parsed = JSON.parse(raw) as unknown;
     if (!isBrandingConfig(parsed)) return defaultBranding;
-    return {
+    const config = {
       ...defaultBranding,
       ...parsed,
+    };
+
+    if (
+      config.loginTitle === LEGACY_LOGIN_TITLE ||
+      /technical\s+dashboard/i.test(config.loginTitle)
+    ) {
+      config.loginTitle = defaultBranding.loginTitle;
+    }
+
+    if (config.loginSubtitle === LEGACY_LOGIN_SUBTITLE) {
+      config.loginSubtitle = defaultBranding.loginSubtitle;
+    }
+
+    return {
+      ...config,
     };
   } catch {
     return defaultBranding;
