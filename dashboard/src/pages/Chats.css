@@ -921,13 +921,16 @@
   align-items: center;
   justify-content: center;
   background: var(--bg-white);
-  border: 1px solid var(--border);
-  border-radius: 16px;
+  border: 0;
+  border-radius: 0;
   padding: 4rem 2rem;
-  margin-top: 1rem;
+  margin: 0;
+  width: 100%;
+  min-height: 0;
+  box-sizing: border-box;
   text-align: center;
   color: var(--text-secondary);
-  box-shadow: var(--shadow-sm);
+  box-shadow: none;
   flex: 1;
 }
 
