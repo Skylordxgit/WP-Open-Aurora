@@ -29,6 +29,7 @@ function createMockEngine() {
     deleteMessage: jest.fn().mockResolvedValue(undefined),
     getChatHistory: jest.fn().mockResolvedValue([]),
     resolveContactPhone: jest.fn().mockResolvedValue(null),
+    getContactById: jest.fn().mockResolvedValue(null),
     getNumberId: jest.fn().mockResolvedValue(null),
     sendChatState: jest.fn().mockResolvedValue(undefined),
   };
@@ -568,6 +569,28 @@ describe('MessageService', () => {
       expect(mockEngine.resolveContactPhone).toHaveBeenCalledWith('152695264563252@lid');
       expect(mockEngine.getNumberId).toHaveBeenCalledWith('628123456789');
       expect(mockEngine.getChatHistory).toHaveBeenLastCalledWith('628123456789@c.us', 100, true);
+    });
+
+    it('uses a verified contact-cache number when direct privacy-id resolution is unavailable', async () => {
+      const liveHistory = [{ id: 'm1', body: 'restored from contact cache', fromMe: false }];
+      mockEngine.getChatHistory.mockRejectedValueOnce(new Error('Chat not found')).mockResolvedValueOnce(liveHistory);
+      mockEngine.resolveContactPhone.mockResolvedValueOnce(null);
+      mockEngine.getContactById.mockResolvedValueOnce({ number: '628777888999' });
+      mockEngine.getNumberId.mockResolvedValueOnce('628777888999@c.us');
+
+      await expect(service.getChatHistory('sess-1', '152695264563252@lid', 100, false)).resolves.toBe(liveHistory);
+      expect(mockEngine.getNumberId).toHaveBeenCalledWith('628777888999');
+      expect(mockEngine.getChatHistory).toHaveBeenLastCalledWith('628777888999@c.us', 100, false);
+    });
+
+    it('never treats the numeric LID token as a phone number', async () => {
+      const originalError = new Error('Chat not found');
+      mockEngine.getChatHistory.mockRejectedValueOnce(originalError);
+      mockEngine.resolveContactPhone.mockResolvedValueOnce(null);
+      mockEngine.getContactById.mockResolvedValueOnce({ number: '152695264563252' });
+
+      await expect(service.getChatHistory('sess-1', '152695264563252@lid')).rejects.toBe(originalError);
+      expect(mockEngine.getNumberId).not.toHaveBeenCalled();
     });
   });
 

@@ -54,7 +54,7 @@ describe('SessionService', () => {
     messageRepository = {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
-      create: jest.fn(),
+      create: jest.fn().mockImplementation((data: Partial<Message>) => data as Message),
       save: jest.fn().mockResolvedValue(undefined),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
@@ -448,6 +448,39 @@ describe('SessionService', () => {
       const sent = dispatchedEvents('message.sent');
       expect(sent).toHaveLength(1);
       expect(sent[0][0]).toBe('sess-uuid-1');
+    });
+
+    it('persists outgoing messages composed on the linked phone', async () => {
+      const echoHook = () =>
+        (hookManager.execute as jest.Mock).mockImplementation((_event: string, data: unknown) =>
+          Promise.resolve({ continue: true, data }),
+        );
+      echoHook();
+      const callbacks = await startAndCaptureCallbacks();
+      const outgoing = makeMessage({
+        id: 'phone-out-1',
+        from: 'me@c.us',
+        to: '111@c.us',
+        chatId: '111@c.us',
+        body: 'Sent from phone',
+        fromMe: true,
+      });
+
+      callbacks.onMessageCreate!(outgoing);
+      await flush();
+      await flush();
+
+      expect(messageRepository.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'sess-uuid-1',
+          waMessageId: 'phone-out-1',
+          chatId: '111@c.us',
+          body: 'Sent from phone',
+          direction: 'outgoing',
+          status: 'sent',
+        }),
+      );
+      expect(messageRepository.save).toHaveBeenCalledWith(expect.objectContaining({ waMessageId: 'phone-out-1' }));
     });
 
     it('scopes the ack status UPDATE by sessionId, not just waMessageId', async () => {

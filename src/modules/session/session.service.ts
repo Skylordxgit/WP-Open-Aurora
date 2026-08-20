@@ -8,7 +8,7 @@ import {
   OnApplicationBootstrap,
 } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, In, Not, IsNull, DataSource } from 'typeorm';
+import { Repository, In, Not, IsNull, DataSource, MoreThan } from 'typeorm';
 import { Session, SessionStatus } from './entities/session.entity';
 import { Message, MessageDirection, MessageStatus } from '../message/entities/message.entity';
 import { CreateSessionDto } from './dto';
@@ -433,13 +433,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
               incoming.senderPhone = await this.resolveSenderPhone(id, incoming.author ?? incoming.from);
             }
 
-            const metadata: Record<string, unknown> = {};
-            if (incoming.media) {
-              metadata.media = incoming.media;
-            }
-            if (incoming.quotedMessage) {
-              metadata.quotedMessage = incoming.quotedMessage;
-            }
+            const metadata = this.buildStoredMessageMetadata(incoming);
 
             const dbMessage = this.messageRepository.create({
               sessionId: id,
@@ -500,6 +494,10 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
             if (!shouldContinue) {
               return;
             }
+
+            // Messages composed on the linked phone do not pass through MessageService, so persist
+            // them here as well. API sends are matched to their pending row to avoid duplicates.
+            void this.persistOutgoingEngineMessage(id, finalMessage);
 
             // Dispatch to webhooks with potentially modified message
             void this.webhookService.dispatch(id, 'message.sent', finalMessage);
@@ -832,6 +830,72 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
 
   getEngine(id: string): IWhatsAppEngine | undefined {
     return this.engines.get(id);
+  }
+
+  private buildStoredMessageMetadata(message: IncomingMessage): Record<string, unknown> {
+    const metadata: Record<string, unknown> = {};
+    if (message.media) metadata.media = message.media;
+    if (message.quotedMessage) metadata.quotedMessage = message.quotedMessage;
+    if (message.location) metadata.location = message.location;
+    if (message.contact) metadata.contact = message.contact;
+    if (message.senderPhone) metadata.senderPhone = message.senderPhone;
+    if (message.author) metadata.author = message.author;
+    return metadata;
+  }
+
+  private async persistOutgoingEngineMessage(sessionId: string, outgoing: IncomingMessage): Promise<void> {
+    try {
+      let stored = await this.messageRepository.findOne({
+        where: { sessionId, waMessageId: outgoing.id },
+      });
+
+      // During an API send, message_create can arrive before MessageService has attached the WhatsApp
+      // id to its pending row. Match the newest pending copy by chat/body before creating a new row.
+      if (!stored) {
+        stored = await this.messageRepository.findOne({
+          where: {
+            sessionId,
+            chatId: outgoing.chatId,
+            body: outgoing.body,
+            direction: MessageDirection.OUTGOING,
+            status: MessageStatus.PENDING,
+            createdAt: MoreThan(new Date(Date.now() - 2 * 60 * 1000)),
+          },
+          order: { createdAt: 'DESC' },
+        });
+      }
+
+      const incomingMetadata = this.buildStoredMessageMetadata(outgoing);
+      if (stored) {
+        stored.waMessageId = outgoing.id;
+        stored.from = outgoing.from;
+        stored.to = outgoing.to;
+        stored.body = outgoing.body || stored.body;
+        stored.type = outgoing.type === 'unknown' ? stored.type : outgoing.type;
+        stored.timestamp = outgoing.timestamp;
+        stored.status = MessageStatus.SENT;
+        stored.metadata = { ...(stored.metadata || {}), ...incomingMetadata };
+        await this.messageRepository.save(stored);
+        return;
+      }
+
+      const message = this.messageRepository.create({
+        sessionId,
+        waMessageId: outgoing.id,
+        chatId: outgoing.chatId,
+        from: outgoing.from,
+        to: outgoing.to,
+        body: outgoing.body,
+        type: outgoing.type,
+        direction: MessageDirection.OUTGOING,
+        timestamp: outgoing.timestamp,
+        status: MessageStatus.SENT,
+        metadata: Object.keys(incomingMetadata).length > 0 ? incomingMetadata : undefined,
+      });
+      await this.messageRepository.save(message);
+    } catch (error) {
+      this.logger.error(`Failed to persist outgoing engine message ${outgoing.id}`, String(error));
+    }
   }
 
   /**

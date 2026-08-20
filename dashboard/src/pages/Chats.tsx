@@ -128,7 +128,7 @@ const getChatDisplayName = (chat: Pick<Chat, 'id' | 'name' | 'displayName' | 'ph
   }
 
   if (chat.phone?.trim()) return chat.phone.trim();
-  if (chat.id.endsWith('@lid')) return 'WhatsApp contact';
+  if (chat.id.endsWith('@lid')) return 'Number unavailable';
   return getChatNumber(chat.id);
 };
 
@@ -178,6 +178,14 @@ const normalizeLiveMessage = (message: LiveChatMessage): ChatMessageView => {
   };
 };
 
+const isRenderableMessage = (message: ChatMessageView): boolean => {
+  if (message.type === 'revoked') return true;
+  if (message.body?.trim()) return true;
+  if (message.metadata?.quotedMessage?.body?.trim()) return true;
+  if (message.type === 'location' && message.metadata?.location) return true;
+  return ['image', 'sticker', 'video', 'audio', 'voice', 'document'].includes(message.type);
+};
+
 const mergeMessageHistory = (...collections: ChatMessageView[][]): ChatMessageView[] => {
   const merged = new Map<string, ChatMessageView>();
 
@@ -214,7 +222,7 @@ const mergeMessageHistory = (...collections: ChatMessageView[][]): ChatMessageVi
     }
   }
 
-  return [...merged.values()].sort((a, b) => messageTimestamp(a) - messageTimestamp(b));
+  return [...merged.values()].filter(isRenderableMessage).sort((a, b) => messageTimestamp(a) - messageTimestamp(b));
 };
 
 export function Chats() {
@@ -263,9 +271,11 @@ export function Chats() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messageRequestRef = useRef(0);
   const contactResolutionRequestRef = useRef(0);
+  const contactResolutionInFlightRef = useRef<string | null>(null);
   const shouldScrollToBottomRef = useRef(false);
   const preservedScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const [replyingTo, setReplyingTo] = useState<ChatMessageView | null>(null);
+  const activeChatId = activeChat?.id;
 
   // Popular emojis
   const popularEmojis = [
@@ -321,7 +331,8 @@ export function Chats() {
         setChats(sorted);
 
         const privacyContactIds = sorted.filter(chat => !chat.isGroup && chat.id.endsWith('@lid')).map(chat => chat.id);
-        if (privacyContactIds.length > 0) {
+        if (privacyContactIds.length > 0 && !contactResolutionInFlightRef.current) {
+          contactResolutionInFlightRef.current = sessionId;
           void contactApi
             .resolve(sessionId, privacyContactIds)
             .then(resolvedContacts => {
@@ -329,7 +340,7 @@ export function Chats() {
               const resolvedById = new Map(resolvedContacts.map(contact => [contact.contactId, contact]));
               const enrichChat = (chat: Chat): Chat => {
                 const resolved = resolvedById.get(chat.id);
-                if (!resolved) return chat;
+                if (!resolved?.phone && !resolved?.name) return chat;
                 return {
                   ...chat,
                   displayName: resolved.name || resolved.phone || undefined,
@@ -340,7 +351,12 @@ export function Chats() {
               setActiveChat(current => (current ? enrichChat(current) : current));
             })
             .catch(() => {
-              // Keep the neutral "WhatsApp contact" label when WhatsApp cannot resolve a privacy ID.
+              // A background retry below runs after the WhatsApp session finishes synchronizing.
+            })
+            .finally(() => {
+              if (contactResolutionInFlightRef.current === sessionId) {
+                contactResolutionInFlightRef.current = null;
+              }
             });
         }
       } catch (err) {
@@ -362,6 +378,64 @@ export function Chats() {
       setPreviewUrl(null);
     }
   }, [selectedSessionId, loadChats]);
+
+  // The initial chat list can come from the database while WhatsApp is reconnecting. Retry unresolved
+  // privacy contacts after sync instead of permanently keeping the result of that first attempt.
+  const unresolvedPrivacyContactKey = chats
+    .filter(chat => !chat.isGroup && chat.id.endsWith('@lid') && !chat.phone && !chat.displayName)
+    .map(chat => chat.id)
+    .join('|');
+
+  useEffect(() => {
+    const unresolvedIds = unresolvedPrivacyContactKey.split('|').filter(Boolean);
+    if (!selectedSessionId || unresolvedIds.length === 0) return;
+
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    let attempts = 0;
+
+    const resolveUnresolvedContacts = async () => {
+      if (cancelled) return;
+      if (contactResolutionInFlightRef.current) {
+        retryTimer = window.setTimeout(resolveUnresolvedContacts, 3000);
+        return;
+      }
+      contactResolutionInFlightRef.current = selectedSessionId;
+      try {
+        const resolvedContacts = await contactApi.resolve(selectedSessionId, unresolvedIds);
+        if (cancelled) return;
+        if (!resolvedContacts.some(contact => contact.phone || contact.name)) return;
+        const resolvedById = new Map(resolvedContacts.map(contact => [contact.contactId, contact]));
+        const enrichChat = (chat: Chat): Chat => {
+          const resolved = resolvedById.get(chat.id);
+          if (!resolved?.phone && !resolved?.name) return chat;
+          return {
+            ...chat,
+            displayName: resolved.name || resolved.phone || undefined,
+            phone: resolved.phone || undefined,
+          };
+        };
+        setChats(current => current.map(enrichChat));
+        setActiveChat(current => (current ? enrichChat(current) : current));
+      } catch {
+        // A 503 is expected until the scanned WhatsApp session reaches READY.
+      } finally {
+        if (contactResolutionInFlightRef.current === selectedSessionId) {
+          contactResolutionInFlightRef.current = null;
+        }
+        attempts += 1;
+        if (!cancelled && attempts < 12) {
+          retryTimer = window.setTimeout(resolveUnresolvedContacts, 10000);
+        }
+      }
+    };
+
+    retryTimer = window.setTimeout(resolveUnresolvedContacts, 3000);
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [selectedSessionId, unresolvedPrivacyContactKey]);
 
   const markChatRead = useCallback(
     (chatId: string) => {
@@ -588,6 +662,56 @@ export function Chats() {
     [selectedSessionId, markChatRead, t, showErrorToast],
   );
 
+  // A stored-only result usually means the chat was opened before the WhatsApp engine finished
+  // reconnecting. Recover the live history automatically so old incoming and outgoing messages appear
+  // without requiring the operator to refresh or reselect the conversation.
+  useEffect(() => {
+    if (!selectedSessionId || !activeChatId || historySource !== 'stored') return;
+
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    let attempts = 0;
+
+    const recoverLiveHistory = async () => {
+      if (cancelled) return;
+      try {
+        const liveHistory = await sessionApi.getLiveChatHistory(selectedSessionId, activeChatId, historyLimit, false);
+        if (cancelled) return;
+        const normalized = liveHistory.map(normalizeLiveMessage).filter(isRenderableMessage);
+        if (normalized.length === 0 && messages.length > 0) {
+          throw new Error('WhatsApp history is not synchronized yet');
+        }
+
+        setMessages(previous => mergeMessageHistory(previous, normalized));
+        setHistorySource('live');
+        setCanLoadOlder(historyLimit < MAX_HISTORY_LIMIT && liveHistory.length >= historyLimit);
+        setLoadingMedia(true);
+        void sessionApi
+          .getLiveChatHistory(selectedSessionId, activeChatId, historyLimit, true)
+          .then(mediaHistory => {
+            if (!cancelled) {
+              setMessages(previous => mergeMessageHistory(previous, mediaHistory.map(normalizeLiveMessage)));
+            }
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            if (!cancelled) setLoadingMedia(false);
+          });
+      } catch {
+        attempts += 1;
+        if (!cancelled && attempts < 12) {
+          retryTimer = window.setTimeout(recoverLiveHistory, 10000);
+        }
+      }
+    };
+
+    retryTimer = window.setTimeout(recoverLiveHistory, 3000);
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [activeChatId, historyLimit, historySource, messages.length, selectedSessionId]);
+
   const handleLoadOlderMessages = () => {
     if (!activeChat || loadingOlderMessages) return;
     const room = roomMessagesRef.current;
@@ -669,13 +793,13 @@ export function Chats() {
   };
 
   useEffect(() => {
-    if (activeChat) {
+    if (activeChatId) {
       setHistoryLimit(INITIAL_HISTORY_LIMIT);
       setCanLoadOlder(false);
       setHistorySource('live');
       preservedScrollRef.current = null;
-      void loadMessages(activeChat.id, INITIAL_HISTORY_LIMIT);
-      setChats(prev => prev.map(c => (c.id === activeChat.id ? { ...c, unreadCount: 0 } : c)));
+      void loadMessages(activeChatId, INITIAL_HISTORY_LIMIT);
+      setChats(prev => prev.map(c => (c.id === activeChatId ? { ...c, unreadCount: 0 } : c)));
     } else {
       messageRequestRef.current += 1;
       setMessages([]);
@@ -683,7 +807,7 @@ export function Chats() {
       setLoadingOlderMessages(false);
       setLoadingMedia(false);
     }
-  }, [activeChat, loadMessages]);
+  }, [activeChatId, loadMessages]);
 
   // 5. Keep the viewport stable while prepending history, and only follow new messages when the
   // operator was already near the bottom (or just sent a message).

@@ -1,7 +1,7 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ContactService } from './contact.service';
 import { SessionService } from '../session/session.service';
-import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
+import { EngineStatus, IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 
 describe('ContactService', () => {
   const makeService = (engine: Partial<IWhatsAppEngine> | undefined) => {
@@ -9,7 +9,8 @@ describe('ContactService', () => {
     const savedContactRepository = {
       find: jest.fn().mockResolvedValue([]),
     };
-    return new ContactService(sessionService, savedContactRepository as never);
+    const messageRepository = { find: jest.fn().mockResolvedValue([]) };
+    return new ContactService(sessionService, savedContactRepository as never, messageRepository as never);
   };
 
   it('throws 400 when the session is not started', () => {
@@ -43,6 +44,7 @@ describe('ContactService', () => {
 
   it('resolves privacy IDs to a contact name and actual phone number', async () => {
     const svc = makeService({
+      getStatus: jest.fn().mockReturnValue(EngineStatus.READY),
       getContacts: jest.fn().mockResolvedValue([
         {
           id: '628123456789@c.us',
@@ -58,5 +60,51 @@ describe('ContactService', () => {
     await expect(svc.resolveContacts('s1', ['152695264563252@lid'])).resolves.toEqual([
       { contactId: '152695264563252@lid', phone: '628123456789', name: 'Alice' },
     ]);
+  });
+
+  it('uses a direct contact number only when it differs from the privacy identifier', async () => {
+    const svc = makeService({
+      getStatus: jest.fn().mockReturnValue(EngineStatus.READY),
+      getContacts: jest.fn().mockResolvedValue([
+        {
+          id: '152695264563252@lid',
+          number: '628123456789',
+          name: 'Alice',
+          isMyContact: true,
+          isBlocked: false,
+        },
+      ]),
+      resolveContactPhone: jest.fn().mockResolvedValue(null),
+    });
+
+    await expect(svc.resolveContacts('s1', ['152695264563252@lid'])).resolves.toEqual([
+      { contactId: '152695264563252@lid', phone: '628123456789', name: 'Alice' },
+    ]);
+  });
+
+  it('rejects a direct contact number that is only the LID token', async () => {
+    const svc = makeService({
+      getStatus: jest.fn().mockReturnValue(EngineStatus.READY),
+      getContacts: jest.fn().mockResolvedValue([
+        {
+          id: '152695264563252@lid',
+          number: '152695264563252',
+          isMyContact: false,
+          isBlocked: false,
+        },
+      ]),
+      resolveContactPhone: jest.fn().mockResolvedValue(null),
+    });
+
+    await expect(svc.resolveContacts('s1', ['152695264563252@lid'])).resolves.toEqual([
+      { contactId: '152695264563252@lid', phone: null, name: null },
+    ]);
+  });
+
+  it('returns 503 while the WhatsApp session is still synchronizing so callers can retry', async () => {
+    const svc = makeService({ getStatus: jest.fn().mockReturnValue(EngineStatus.INITIALIZING) });
+    await expect(svc.resolveContacts('s1', ['152695264563252@lid'])).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
   });
 });

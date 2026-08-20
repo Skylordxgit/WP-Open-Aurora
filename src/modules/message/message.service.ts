@@ -546,7 +546,7 @@ export class MessageService {
       // Privacy IDs may appear in getChats even when history is stored under the canonical phone JID.
       // Resolve and retry through engine-neutral methods; the adapter remains untouched.
       try {
-        const phone = await engine.resolveContactPhone(chatId);
+        const phone = await this.resolveChatPhone(engine, chatId);
         const canonicalChatId = phone ? await engine.getNumberId(phone) : null;
         if (canonicalChatId && canonicalChatId !== chatId) {
           return await engine.getChatHistory(canonicalChatId, safeLimit, includeMedia);
@@ -555,6 +555,28 @@ export class MessageService {
         // Preserve the original history error, which is more useful to the API caller.
       }
       throw originalError;
+    }
+  }
+
+  private async resolveChatPhone(engine: IWhatsAppEngine, chatId: string): Promise<string | null> {
+    const privacyIdDigits = chatId.endsWith('@lid') ? chatId.split('@')[0].replace(/\D/g, '') : '';
+    const normalizeCandidate = (value?: string | null): string | null => {
+      const digits = value?.replace(/\D/g, '') || '';
+      return digits && digits !== privacyIdDigits ? digits : null;
+    };
+
+    try {
+      const resolved = normalizeCandidate(await engine.resolveContactPhone(chatId));
+      if (resolved) return resolved;
+    } catch {
+      // Fall through to the contact cache, which may still expose a canonical number.
+    }
+
+    try {
+      const contact = await engine.getContactById(chatId);
+      return normalizeCandidate(contact?.number);
+    } catch {
+      return null;
     }
   }
 

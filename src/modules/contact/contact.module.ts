@@ -4,9 +4,10 @@ import { ContactController } from './contact.controller';
 import { ContactService } from './contact.service';
 import { SessionModule } from '../session/session.module';
 import { SavedContact } from './entities/saved-contact.entity';
+import { Message } from '../message/entities/message.entity';
 
 @Module({
-  imports: [SessionModule, TypeOrmModule.forFeature([SavedContact], 'data')],
+  imports: [SessionModule, TypeOrmModule.forFeature([SavedContact, Message], 'data')],
   controllers: [ContactController],
   providers: [ContactService],
 })

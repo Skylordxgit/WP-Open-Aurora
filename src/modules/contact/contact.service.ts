@@ -1,10 +1,11 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { SessionService } from '../session/session.service';
-import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
+import { EngineStatus, IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 import { SavedContact } from './entities/saved-contact.entity';
 import { SaveContactsDto } from './dto/saved-contact.dto';
+import { Message } from '../message/entities/message.entity';
 
 /**
  * Owns engine access for contact operations so the "session not started" guard and
@@ -16,6 +17,8 @@ export class ContactService {
     private readonly sessionService: SessionService,
     @InjectRepository(SavedContact, 'data')
     private readonly savedContactRepository: Repository<SavedContact>,
+    @InjectRepository(Message, 'data')
+    private readonly messageRepository: Repository<Message>,
   ) {}
 
   private getEngine(sessionId: string): IWhatsAppEngine {
@@ -53,7 +56,19 @@ export class ContactService {
   async resolveContacts(sessionId: string, contactIds: string[]) {
     const engine = this.getEngine(sessionId);
     const uniqueIds = [...new Set(contactIds.map(id => id.trim()).filter(Boolean))];
+    if (engine.getStatus() !== EngineStatus.READY) {
+      throw new ServiceUnavailableException('WhatsApp session is still synchronizing');
+    }
+
     const savedContacts = await this.listSavedContacts(sessionId);
+    const storedMessages =
+      uniqueIds.length > 0
+        ? await this.messageRepository.find({
+            where: { sessionId, chatId: In(uniqueIds) },
+            order: { createdAt: 'DESC' },
+            take: Math.min(Math.max(uniqueIds.length * 10, 50), 1000),
+          })
+        : [];
 
     let engineContacts: Awaited<ReturnType<IWhatsAppEngine['getContacts']>> = [];
     try {
@@ -73,6 +88,24 @@ export class ContactService {
       const number = this.normalizeDigits(contact.number);
       if (number) savedByNumber.set(number, contact);
     }
+    const storedIdentityById = new Map<string, { phone: string | null; name: string | null }>();
+    for (const message of storedMessages) {
+      const metadata = message.metadata as
+        | { senderPhone?: unknown; contact?: { name?: unknown; pushName?: unknown } }
+        | undefined;
+      const existing = storedIdentityById.get(message.chatId);
+      const phone = this.normalizePhoneCandidate(metadata?.senderPhone, message.chatId);
+      const contactName =
+        (typeof metadata?.contact?.name === 'string' && metadata.contact.name.trim()) ||
+        (typeof metadata?.contact?.pushName === 'string' && metadata.contact.pushName.trim()) ||
+        null;
+      if (!existing || (!existing.phone && phone) || (!existing.name && contactName)) {
+        storedIdentityById.set(message.chatId, {
+          phone: existing?.phone || phone,
+          name: existing?.name || contactName,
+        });
+      }
+    }
     const resolved: Array<{ contactId: string; phone: string | null; name: string | null }> = [];
 
     // Small batches avoid flooding the WhatsApp page context while still resolving a full inbox quickly.
@@ -81,23 +114,23 @@ export class ContactService {
       const batchResults = await Promise.all(
         batch.map(async contactId => {
           const directContact = contactsById.get(contactId);
-          let phone: string | null = null;
+          const storedIdentity = storedIdentityById.get(contactId);
+          let phone = storedIdentity?.phone || null;
           try {
-            phone = await engine.resolveContactPhone(contactId);
+            phone = this.normalizePhoneCandidate(await engine.resolveContactPhone(contactId), contactId) || phone;
           } catch {
-            phone = null;
+            // Contact/message metadata can still contain a verified phone alias.
           }
 
-          const normalizedPhone = this.normalizeDigits(phone || '');
+          const normalizedPhone =
+            phone || this.normalizePhoneCandidate(directContact?.number, contactId) || storedIdentity?.phone || '';
           const phoneContact = normalizedPhone ? contactsByNumber.get(normalizedPhone) : undefined;
           const savedContact = normalizedPhone ? savedByNumber.get(normalizedPhone) : undefined;
-          const name =
-            savedContact?.name?.trim() ||
-            directContact?.name?.trim() ||
-            directContact?.pushName?.trim() ||
-            phoneContact?.name?.trim() ||
-            phoneContact?.pushName?.trim() ||
-            null;
+          const savedName =
+            savedContact?.name?.trim() || directContact?.name?.trim() || phoneContact?.name?.trim() || null;
+          const fallbackName =
+            directContact?.pushName?.trim() || phoneContact?.pushName?.trim() || storedIdentity?.name || null;
+          const name = savedName || (!normalizedPhone ? fallbackName : null);
 
           return { contactId, phone: normalizedPhone || null, name };
         }),
@@ -106,6 +139,16 @@ export class ContactService {
     }
 
     return resolved;
+  }
+
+  private normalizePhoneCandidate(value: unknown, contactId: string): string {
+    if (typeof value !== 'string') return '';
+    const digits = this.normalizeDigits(value);
+    if (!digits) return '';
+
+    // A LID's numeric user part is a privacy identifier, not a callable phone number.
+    const privacyIdDigits = contactId.endsWith('@lid') ? this.normalizeDigits(contactId.split('@')[0]) : '';
+    return privacyIdDigits && digits === privacyIdDigits ? '' : digits;
   }
 
   getProfilePicture(sessionId: string, contactId: string) {
