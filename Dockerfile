@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y \
 # Copy package files
 COPY package*.json ./
 
+# The install hook and ready-sync patcher must exist before npm runs lifecycle scripts.
+COPY scripts/postinstall.js scripts/patch-wwebjs-ready-sync.js ./scripts/
+
 # Install all dependencies (including devDependencies for build)
 RUN npm ci
 
@@ -67,8 +70,13 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
+# Apply the upstream warm-session/message-bridge repair to the production dependency tree.
+COPY scripts/postinstall.js scripts/patch-wwebjs-ready-sync.js ./scripts/
+
 # Install production dependencies only
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev \
+    && node scripts/patch-wwebjs-ready-sync.js \
+    && npm cache clean --force
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist

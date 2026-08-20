@@ -1,6 +1,9 @@
-import { MessageMedia } from 'whatsapp-web.js';
+import { EventEmitter } from 'events';
+import { MessageMedia, WAState } from 'whatsapp-web.js';
 import {
   WhatsAppWebJsAdapter,
+  READY_RECONCILE_BRIDGE_RELOAD_GRACE_MS,
+  READY_RECONCILE_TIMEOUT_MS,
   extractLinkedParentJID,
   loadRemoteMedia,
   resolveWebVersionPin,
@@ -9,6 +12,7 @@ import {
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { EngineStatus } from '../interfaces/whatsapp-engine.interface';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
+import { __resetWebVersionCache, WEB_VERSION_SETTLE_MS } from '../wa-web-version';
 
 describe('wwebjsAckToDeliveryStatus (engine ack-int -> neutral DeliveryStatus boundary, #265)', () => {
   // Regression-locks the integer boundary the decoupling moved behaviour into, incl. the
@@ -155,8 +159,9 @@ describe('WhatsAppWebJsAdapter.resolveContactPhone (@lid -> phone, #263)', () =>
   });
 });
 
-describe('resolveWebVersionPin (#251 — default WA-Web version pin)', () => {
+describe('resolveWebVersionPin (settled WA-Web version pin)', () => {
   const orig = { v: process.env.WWEBJS_WEB_VERSION, p: process.env.WWEBJS_WEB_VERSION_REMOTE_PATH };
+  beforeEach(() => __resetWebVersionCache());
   afterEach(() => {
     if (orig.v === undefined) delete process.env.WWEBJS_WEB_VERSION;
     else process.env.WWEBJS_WEB_VERSION = orig.v;
@@ -164,39 +169,134 @@ describe('resolveWebVersionPin (#251 — default WA-Web version pin)', () => {
     else process.env.WWEBJS_WEB_VERSION_REMOTE_PATH = orig.p;
   });
 
-  it('pins the default known-good WA Web version when unset', () => {
+  it('pins a settled registry version when unset', async () => {
     delete process.env.WWEBJS_WEB_VERSION;
-    expect(resolveWebVersionPin()).toEqual({
-      webVersion: '2.3000.1023204257',
+    const released = new Date(Date.now() - WEB_VERSION_SETTLE_MS - 1000).toISOString();
+    const fetcher = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ currentVersion: '2.3000.200', versions: [{ version: '2.3000.199', released }] }),
+    }) as unknown as typeof fetch;
+
+    await expect(resolveWebVersionPin(fetcher)).resolves.toEqual({
+      webVersion: '2.3000.199',
       webVersionCache: {
         type: 'remote',
-        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1023204257.html',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.199.html',
       },
     });
   });
 
-  it('returns undefined (auto-version) when explicitly set to "latest" / "off"', () => {
-    process.env.WWEBJS_WEB_VERSION = 'latest';
-    expect(resolveWebVersionPin()).toBeUndefined();
+  it('returns undefined only when native selection is explicitly requested', async () => {
     process.env.WWEBJS_WEB_VERSION = 'off';
-    expect(resolveWebVersionPin()).toBeUndefined();
+    const fetcher = jest.fn() as unknown as typeof fetch;
+    await expect(resolveWebVersionPin(fetcher)).resolves.toBeUndefined();
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('pins a remote webVersionCache from the version when set', () => {
+  it('pins a remote webVersionCache from an exact version without a registry request', async () => {
     delete process.env.WWEBJS_WEB_VERSION_REMOTE_PATH;
     process.env.WWEBJS_WEB_VERSION = '2.3000.1023204257';
-    expect(resolveWebVersionPin()).toEqual({
+    const fetcher = jest.fn() as unknown as typeof fetch;
+    await expect(resolveWebVersionPin(fetcher)).resolves.toEqual({
       webVersion: '2.3000.1023204257',
       webVersionCache: {
         type: 'remote',
         remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1023204257.html',
       },
     });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('honors a custom WWEBJS_WEB_VERSION_REMOTE_PATH template ({version} placeholder)', () => {
+  it('honors a custom WWEBJS_WEB_VERSION_REMOTE_PATH template ({version} placeholder)', async () => {
     process.env.WWEBJS_WEB_VERSION = '2.9999.0';
     process.env.WWEBJS_WEB_VERSION_REMOTE_PATH = 'https://cdn.example.com/wa/{version}.html';
-    expect(resolveWebVersionPin()?.webVersionCache.remotePath).toBe('https://cdn.example.com/wa/2.9999.0.html');
+    await expect(resolveWebVersionPin()).resolves.toMatchObject({
+      webVersionCache: { remotePath: 'https://cdn.example.com/wa/2.9999.0.html' },
+    });
+  });
+});
+
+describe('WhatsAppWebJsAdapter ready synchronization', () => {
+  type FakeClient = EventEmitter & {
+    info: { wid: { user: string }; pushname: string };
+    eventsAttached?: boolean;
+    getState: jest.Mock;
+    pupPage: { evaluate: jest.Mock; reload: jest.Mock };
+  };
+
+  function harness(eventsAttached?: boolean) {
+    const adapter = new WhatsAppWebJsAdapter({
+      sessionId: 'sync-session',
+      sessionDataPath: './data/sessions',
+      puppeteer: {},
+    });
+    const client = Object.assign(new EventEmitter(), {
+      info: { wid: { user: '628123' }, pushname: 'Operator' },
+      eventsAttached,
+      getState: jest.fn().mockResolvedValue(WAState.CONNECTED),
+      pupPage: {
+        evaluate: jest.fn().mockResolvedValue(true),
+        reload: jest.fn().mockResolvedValue(undefined),
+      },
+    }) as FakeClient;
+    const onReady = jest.fn();
+    const onError = jest.fn();
+    const internals = adapter as unknown as {
+      client: FakeClient;
+      callbacks: { onReady: jest.Mock; onError: jest.Mock };
+      setupEventHandlers(): void;
+      status: EngineStatus;
+    };
+    internals.client = client;
+    internals.callbacks = { onReady, onError };
+    internals.setupEventHandlers();
+    return { adapter, client, onReady, onError, internals };
+  }
+
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('recovers when whatsapp-web.js misses ready after authentication', async () => {
+    const { client, onReady, internals } = harness(true);
+    client.emit('authenticated');
+
+    await jest.advanceTimersByTimeAsync(2100);
+
+    expect(internals.status).toBe(EngineStatus.READY);
+    expect(onReady).toHaveBeenCalledWith('628123', 'Operator');
+  });
+
+  it('does not expose chats or contacts before the message bridge is attached', () => {
+    const { client, onReady, internals } = harness(false);
+    client.emit('authenticated');
+    client.emit('ready');
+
+    expect(internals.status).toBe(EngineStatus.AUTHENTICATING);
+    expect(onReady).not.toHaveBeenCalled();
+
+    client.eventsAttached = true;
+    client.emit('ready');
+    expect(internals.status).toBe(EngineStatus.READY);
+  });
+
+  it('reloads a connected page once when the event bridge remains detached', async () => {
+    const { client } = harness(false);
+    client.emit('authenticated');
+
+    await jest.advanceTimersByTimeAsync(READY_RECONCILE_BRIDGE_RELOAD_GRACE_MS + 2100);
+
+    expect(client.pupPage.reload).toHaveBeenCalledTimes(1);
+    client.eventsAttached = true;
+    client.emit('ready');
+  });
+
+  it('fails clearly instead of waiting forever when synchronization cannot recover', async () => {
+    const { client, onError, internals } = harness(false);
+    client.emit('authenticated');
+
+    await jest.advanceTimersByTimeAsync(READY_RECONCILE_TIMEOUT_MS + 2100);
+
+    expect(internals.status).toBe(EngineStatus.FAILED);
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('message bridge did not attach'));
   });
 });

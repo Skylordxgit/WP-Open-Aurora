@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { Client, LocalAuth, MessageMedia, MessageTypes } from 'whatsapp-web.js';
+import { Client, LocalAuth, MessageMedia, MessageTypes, WAState } from 'whatsapp-web.js';
 import * as qrcode from 'qrcode';
 import * as path from 'path';
 import {
@@ -44,11 +44,17 @@ import {
   GroupCreateResult,
 } from '../types/whatsapp-web-js.types';
 import { buildIncomingMessageBase } from './message-mapper';
+import { resolveWebVersionPin } from '../wa-web-version';
+
+export { resolveWebVersionPin } from '../wa-web-version';
 
 /** Default cap on a server-side media download: 50 MiB (overridable via MEDIA_DOWNLOAD_MAX_BYTES). */
 const DEFAULT_MEDIA_MAX_BYTES = 50 * 1024 * 1024;
 /** Default timeout for a server-side media download: 30s (overridable via MEDIA_DOWNLOAD_TIMEOUT_MS). */
 const DEFAULT_MEDIA_TIMEOUT_MS = 30_000;
+const READY_RECONCILE_INTERVAL_MS = 2000;
+export const READY_RECONCILE_TIMEOUT_MS = 90_000;
+export const READY_RECONCILE_BRIDGE_RELOAD_GRACE_MS = 45_000;
 
 function positiveIntFromEnv(name: string, fallback: number): number {
   const parsed = Number.parseInt(process.env[name] ?? '', 10);
@@ -104,32 +110,6 @@ export interface WhatsAppWebJsConfig {
 }
 
 /**
- * Optional pin for the WhatsApp Web client version. whatsapp-web.js 1.34.x can get stuck at
- * "authenticating" (the post-link sync never completes) when the auto-fetched WA-Web version is
- * incompatible (#251). By default we pin to a known-good version; set WWEBJS_WEB_VERSION to a
- * different known-good version string (browse
- * https://github.com/wppconnect-team/wa-version) to pin it; WWEBJS_WEB_VERSION_REMOTE_PATH
- * overrides the URL template (use `{version}` as the placeholder) if you self-host the HTML.
- * Set `latest`/`off` to fall back to whatsapp-web.js's default auto-version behavior.
- */
-export function resolveWebVersionPin():
-  | { webVersion: string; webVersionCache: { type: 'remote'; remotePath: string } }
-  | undefined {
-  const version = process.env.WWEBJS_WEB_VERSION?.trim();
-  if (version && (version.toLowerCase() === 'off' || version.toLowerCase() === 'latest')) {
-    return undefined;
-  }
-  const resolvedVersion = version || '2.3000.1023204257';
-  const template =
-    process.env.WWEBJS_WEB_VERSION_REMOTE_PATH?.trim() ||
-    'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html';
-  return {
-    webVersion: resolvedVersion,
-    webVersionCache: { type: 'remote', remotePath: template.replace('{version}', resolvedVersion) },
-  };
-}
-
-/**
  * Extracts the JID of the parent community a group is linked to, if any.
  * The field name has varied across whatsapp-web.js/WA Web versions, so
  * known candidates are checked in order.
@@ -156,6 +136,12 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   private phoneNumber: string | null = null;
   private pushName: string | null = null;
   private callbacks: EngineEventCallbacks = {};
+  private readyReconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  private readyReconcileStartedAt = 0;
+  private readyReconcileProbeInFlight = false;
+  private lastProbeStateConnected = false;
+  private readyReconcileReloadAttempted = false;
+  private tearingDown = false;
 
   constructor(private readonly config: WhatsAppWebJsConfig) {
     super();
@@ -187,9 +173,13 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         );
       }
 
-      // Pin the WA-Web version by default (fixes the 1.34.x "stuck at authenticating"
-      // hang on some setups, #251). Set WWEBJS_WEB_VERSION=latest/off to opt out.
-      const versionPin = resolveWebVersionPin();
+      // Resolve a stable WA-Web build instead of keeping an old hard-coded page forever.
+      // Exact operator pins remain supported; WWEBJS_WEB_VERSION=off opts out.
+      const versionPin = await resolveWebVersionPin();
+      if (this.tearingDown) {
+        this.setStatus(EngineStatus.DISCONNECTED);
+        return;
+      }
       if (versionPin) {
         this.logger.log(`Pinning WhatsApp Web version ${versionPin.webVersion}`);
       }
@@ -234,22 +224,30 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     });
 
     this.client.on('authenticated', () => {
+      if (
+        this.tearingDown ||
+        this.status === EngineStatus.AUTHENTICATING ||
+        this.status === EngineStatus.READY ||
+        this.status === EngineStatus.FAILED
+      ) {
+        return;
+      }
       this.setStatus(EngineStatus.AUTHENTICATING);
       this.qrCode = null;
+      this.scheduleReadyReconcile();
     });
 
     this.client.on('ready', () => {
-      try {
-        const info = this.client?.info;
-        this.phoneNumber = info?.wid?.user || null;
-        this.pushName = info?.pushname || null;
-        this.setStatus(EngineStatus.READY);
-        this.callbacks.onReady?.(this.phoneNumber || '', this.pushName || '');
-      } catch (error) {
-        this.logger.error('Error getting client info', String(error));
-        this.setStatus(EngineStatus.READY);
-        this.callbacks.onReady?.('', '');
+      // The patched client flips this marker only after the page-to-Node event bridge attaches.
+      // A premature READY would otherwise expose empty chats/contacts and lose inbound messages.
+      if (this.client?.eventsAttached === false) {
+        this.logger.warn('Ignoring premature ready because the WhatsApp message bridge is not attached', {
+          sessionId: this.config.sessionId,
+          action: 'premature_ready_ignored',
+        });
+        return;
       }
+      this.markReadyFromClientInfo();
     });
 
     // eslint-disable-next-line @typescript-eslint/no-misused-promises
@@ -374,11 +372,13 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     });
 
     this.client.on('disconnected', reason => {
+      this.clearReadyReconcile();
       this.setStatus(EngineStatus.DISCONNECTED);
       this.callbacks.onDisconnected?.(reason);
     });
 
     this.client.on('auth_failure', (message?: string) => {
+      this.clearReadyReconcile();
       this.setStatus(EngineStatus.FAILED);
       // Authentication failure is terminal: the stored credentials are invalid and
       // reconnecting will not help — the operator must re-scan the QR code. Route it
@@ -387,51 +387,195 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     });
   }
 
+  private markReadyFromClientInfo(): void {
+    if (
+      this.tearingDown ||
+      [EngineStatus.READY, EngineStatus.DISCONNECTED, EngineStatus.FAILED].includes(this.status)
+    ) {
+      return;
+    }
+
+    this.clearReadyReconcile();
+    try {
+      const info = this.client?.info;
+      this.phoneNumber = info?.wid?.user || null;
+      this.pushName = info?.pushname || null;
+      this.setStatus(EngineStatus.READY);
+      this.callbacks.onReady?.(this.phoneNumber || '', this.pushName || '');
+    } catch (error) {
+      this.logger.error('Error getting client info', String(error));
+      this.setStatus(EngineStatus.READY);
+      this.callbacks.onReady?.('', '');
+    }
+  }
+
+  private scheduleReadyReconcile(): void {
+    this.clearReadyReconcile();
+    this.readyReconcileStartedAt = Date.now();
+
+    const tick = (): void => {
+      if (!this.client || this.status !== EngineStatus.AUTHENTICATING) {
+        this.clearReadyReconcile();
+        return;
+      }
+
+      if (Date.now() - this.readyReconcileStartedAt >= READY_RECONCILE_TIMEOUT_MS) {
+        const bridgeDead =
+          this.lastProbeStateConnected &&
+          (this.client as Client & { eventsAttached?: boolean }).eventsAttached === false;
+        const reason = bridgeDead
+          ? 'WhatsApp Web connected, but its message bridge did not attach. The saved session was kept; restart the session to relaunch the browser.'
+          : 'WhatsApp Web did not finish synchronizing within 90 seconds. Restart the session and check the selected WhatsApp Web build.';
+
+        this.logger.error(reason, undefined, {
+          sessionId: this.config.sessionId,
+          action: bridgeDead ? 'ready_reconcile_bridge_dead' : 'ready_reconcile_timeout',
+        });
+        this.clearReadyReconcile();
+        this.setStatus(EngineStatus.FAILED);
+        this.callbacks.onError?.(reason);
+        return;
+      }
+
+      // Schedule first so a hung getState() cannot leave the session waiting forever.
+      this.readyReconcileTimer = setTimeout(tick, READY_RECONCILE_INTERVAL_MS);
+      this.readyReconcileTimer.unref?.();
+
+      if (this.readyReconcileProbeInFlight) return;
+      this.readyReconcileProbeInFlight = true;
+
+      void this.isClientRuntimeReady()
+        .then(ready => {
+          if (ready && this.client && this.status === EngineStatus.AUTHENTICATING) {
+            this.logger.warn('WhatsApp Web ready event was missed; reconciling from runtime state', {
+              sessionId: this.config.sessionId,
+              action: 'ready_event_reconciled',
+            });
+            this.markReadyFromClientInfo();
+          } else if (this.status === EngineStatus.AUTHENTICATING) {
+            this.maybeReloadDeadBridge();
+          }
+        })
+        .catch(error => this.logger.debug('Ready reconciliation probe failed', { error: String(error) }))
+        .finally(() => {
+          this.readyReconcileProbeInFlight = false;
+        });
+    };
+
+    this.readyReconcileTimer = setTimeout(tick, READY_RECONCILE_INTERVAL_MS);
+    this.readyReconcileTimer.unref?.();
+  }
+
+  private clearReadyReconcile(): void {
+    if (this.readyReconcileTimer) {
+      clearTimeout(this.readyReconcileTimer);
+      this.readyReconcileTimer = null;
+    }
+    this.readyReconcileStartedAt = 0;
+    this.readyReconcileProbeInFlight = false;
+    this.lastProbeStateConnected = false;
+    this.readyReconcileReloadAttempted = false;
+  }
+
+  private async isClientRuntimeReady(): Promise<boolean> {
+    if (!this.client) return false;
+
+    const connected = (await this.client.getState()) === WAState.CONNECTED;
+    this.lastProbeStateConnected = connected;
+    if (!connected || !this.client.info?.wid?.user) return false;
+
+    if ((this.client as Client & { eventsAttached?: boolean }).eventsAttached === false) return false;
+
+    const page = (this.client as unknown as { pupPage?: { evaluate: <T>(fn: () => T) => Promise<T> } }).pupPage;
+    const hasRuntime = await page?.evaluate(
+      () => typeof (window as unknown as { WWebJS?: unknown }).WWebJS !== 'undefined',
+    );
+    return hasRuntime === true;
+  }
+
+  private maybeReloadDeadBridge(): void {
+    if (this.readyReconcileReloadAttempted || !this.client || !this.lastProbeStateConnected) return;
+    if ((this.client as Client & { eventsAttached?: boolean }).eventsAttached !== false) return;
+    if (Date.now() - this.readyReconcileStartedAt < READY_RECONCILE_BRIDGE_RELOAD_GRACE_MS) return;
+
+    this.readyReconcileReloadAttempted = true;
+    this.logger.warn('WhatsApp Web message bridge did not attach; reloading the page once to reinject', {
+      sessionId: this.config.sessionId,
+      action: 'event_bridge_reload',
+    });
+
+    const page = (this.client as unknown as { pupPage?: { reload?: () => Promise<unknown> } }).pupPage;
+    void page?.reload?.()?.catch((error: unknown) =>
+      this.logger.warn('WhatsApp event-bridge reload failed', {
+        sessionId: this.config.sessionId,
+        error: String(error),
+      }),
+    );
+  }
+
   private setStatus(status: EngineStatus): void {
     this.status = status;
     this.callbacks.onStateChanged?.(status);
     this.emit('stateChanged', status);
   }
 
-  async disconnect(): Promise<void> {
-    if (this.client) {
-      try {
-        // Use destroy instead of logout to preserve session data
-        // This allows reconnecting without needing to scan QR again
-        await this.client.destroy();
-      } catch (error) {
-        this.logger.warn('Destroy client failed:', String(error));
-        // Already destroyed or not initialized - ignore
-      }
-      this.client = null;
+  private beginClientTeardown(): Client | null {
+    this.tearingDown = true;
+    this.clearReadyReconcile();
+
+    const client = this.client;
+    if (client && this.status !== EngineStatus.DISCONNECTED) {
       this.setStatus(EngineStatus.DISCONNECTED);
+    }
+
+    return client;
+  }
+
+  private finishClientTeardown(client: Client): void {
+    if (this.client === client) this.client = null;
+    this.clearReadyReconcile();
+  }
+
+  async disconnect(): Promise<void> {
+    const client = this.beginClientTeardown();
+    if (!client) return;
+
+    try {
+      // Preserve LocalAuth data so a restart does not require another QR scan.
+      await client.destroy();
+    } catch (error) {
+      this.logger.warn('Destroy client failed:', String(error));
+    } finally {
+      this.finishClientTeardown(client);
     }
   }
 
   async logout(): Promise<void> {
-    if (this.client) {
+    const client = this.beginClientTeardown();
+    if (!client) return;
+
+    try {
+      await client.logout();
+    } catch (error) {
+      this.logger.warn('Logout failed:', String(error));
       try {
-        // Logout clears session data - user will need to scan QR again
-        await this.client.logout();
-      } catch (error) {
-        this.logger.warn('Logout failed:', String(error));
-        // Fall back to destroy if logout fails
-        try {
-          await this.client.destroy();
-        } catch (destroyError) {
-          this.logger.warn('Client destroy also failed during logout fallback', String(destroyError));
-        }
+        await client.destroy();
+      } catch (destroyError) {
+        this.logger.warn('Client destroy also failed during logout fallback', String(destroyError));
       }
-      this.client = null;
-      this.setStatus(EngineStatus.DISCONNECTED);
+    } finally {
+      this.finishClientTeardown(client);
     }
   }
 
   async destroy(): Promise<void> {
-    if (this.client) {
-      await this.client.destroy();
-      this.client = null;
-      this.setStatus(EngineStatus.DISCONNECTED);
+    const client = this.beginClientTeardown();
+    if (!client) return;
+
+    try {
+      await client.destroy();
+    } finally {
+      this.finishClientTeardown(client);
     }
   }
 
