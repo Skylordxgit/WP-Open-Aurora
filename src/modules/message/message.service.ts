@@ -539,7 +539,23 @@ export class MessageService {
     const safeLimit = Number.isFinite(limit)
       ? Math.min(Math.max(Math.trunc(limit), 1), MessageService.MAX_CHAT_HISTORY_LIMIT)
       : 50;
-    return engine.getChatHistory(chatId, safeLimit, includeMedia);
+
+    try {
+      return await engine.getChatHistory(chatId, safeLimit, includeMedia);
+    } catch (originalError) {
+      // Privacy IDs may appear in getChats even when history is stored under the canonical phone JID.
+      // Resolve and retry through engine-neutral methods; the adapter remains untouched.
+      try {
+        const phone = await engine.resolveContactPhone(chatId);
+        const canonicalChatId = phone ? await engine.getNumberId(phone) : null;
+        if (canonicalChatId && canonicalChatId !== chatId) {
+          return await engine.getChatHistory(canonicalChatId, safeLimit, includeMedia);
+        }
+      } catch {
+        // Preserve the original history error, which is more useful to the API caller.
+      }
+      throw originalError;
+    }
   }
 
   // ========== Delete Message ==========

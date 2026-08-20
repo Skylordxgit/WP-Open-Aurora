@@ -42,7 +42,7 @@ interface ReconnectState {
 export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicationBootstrap {
   private readonly logger = createLogger('SessionService');
   private static readonly CHAT_FETCH_TIMEOUT_MS = 15_000;
-  private static readonly CHAT_FALLBACK_MESSAGE_SCAN = 250;
+  private static readonly CHAT_FALLBACK_MESSAGE_SCAN = 5000;
 
   // In-memory map of active engine instances
   private engines: Map<string, IWhatsAppEngine> = new Map();
@@ -886,16 +886,37 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       throw new BadRequestException('Session is not started');
     }
 
+    let chatFetchTimer: NodeJS.Timeout | undefined;
     try {
-      return await Promise.race([
+      const liveChats = await Promise.race([
         engine.getChats(),
         new Promise<ChatSummary[]>((_, reject) => {
-          setTimeout(
+          chatFetchTimer = setTimeout(
             () => reject(new Error('Timed out waiting for WhatsApp chat list')),
             SessionService.CHAT_FETCH_TIMEOUT_MS,
           );
         }),
       ]);
+      const storedChats = await this.getChatsFromStoredMessages(id);
+      const merged = new Map(liveChats.map(chat => [chat.id, chat]));
+
+      for (const storedChat of storedChats) {
+        const liveChat = merged.get(storedChat.id);
+        if (!liveChat) {
+          merged.set(storedChat.id, storedChat);
+          continue;
+        }
+
+        if ((storedChat.timestamp || 0) > (liveChat.timestamp || 0)) {
+          merged.set(storedChat.id, {
+            ...liveChat,
+            timestamp: storedChat.timestamp,
+            lastMessage: storedChat.lastMessage || liveChat.lastMessage,
+          });
+        }
+      }
+
+      return [...merged.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
     } catch (error) {
       this.logger.warn(`Live chat fetch failed for session ${id}; falling back to stored messages`, {
         sessionId: id,
@@ -903,6 +924,8 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         action: 'get_chats_fallback',
       });
       return this.getChatsFromStoredMessages(id);
+    } finally {
+      if (chatFetchTimer) clearTimeout(chatFetchTimer);
     }
   }
 

@@ -161,6 +161,8 @@ export interface BulkMessageBatchStatus {
 export interface Chat {
   id: string;
   name: string;
+  displayName?: string;
+  phone?: string;
   isGroup: boolean;
   unreadCount: number;
   timestamp: number;
@@ -460,7 +462,7 @@ export const sessionApi = {
     });
     return request<LiveChatMessage[]>(
       `/sessions/${id}/messages/${encodeURIComponent(chatId)}/history?${query.toString()}`,
-      { timeoutMs: includeMedia ? 120000 : 30000 },
+      { timeoutMs: includeMedia ? 180000 : 90000 },
     );
   },
 };
@@ -543,6 +545,12 @@ export interface SavedContactRecord {
   updatedAt: string;
 }
 
+export interface ResolvedContactRecord {
+  contactId: string;
+  phone: string | null;
+  name: string | null;
+}
+
 export const contactApi = {
   list: (sessionId: string) => request<ContactRecord[]>(`/sessions/${sessionId}/contacts`),
   listSaved: (sessionId: string) => request<SavedContactRecord[]>(`/sessions/${sessionId}/contacts/saved`),
@@ -557,6 +565,12 @@ export const contactApi = {
     request<{ success: boolean }>(`/sessions/${sessionId}/contacts/saved/${id}`, { method: 'DELETE' }),
   checkNumber: (sessionId: string, number: string) =>
     request<CheckNumberResponse>(`/sessions/${sessionId}/contacts/check/${encodeURIComponent(number)}`),
+  resolve: (sessionId: string, contactIds: string[]) =>
+    request<ResolvedContactRecord[]>(`/sessions/${sessionId}/contacts/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ contactIds }),
+      timeoutMs: 90000,
+    }),
 };
 
 // =============================================================================

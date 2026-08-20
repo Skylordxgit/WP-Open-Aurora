@@ -3,7 +3,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { ContactService } from './contact.service';
 import { RequireRole } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
-import { SaveContactsDto } from './dto/saved-contact.dto';
+import { ResolveContactsDto, SaveContactsDto } from './dto/saved-contact.dto';
 
 @ApiTags('contacts')
 @Controller('sessions/:sessionId/contacts')
@@ -34,6 +34,15 @@ export class ContactController {
   @ApiResponse({ status: 200, description: 'Saved contacts cleared' })
   async clearSaved(@Param('sessionId') sessionId: string) {
     return this.contactService.clearSavedContacts(sessionId);
+  }
+
+  @Post('resolve')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Resolve multiple WhatsApp contact IDs to saved names and phone numbers' })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiResponse({ status: 200, description: 'Resolved contacts keyed by their original WhatsApp IDs' })
+  async resolveContacts(@Param('sessionId') sessionId: string, @Body() dto: ResolveContactsDto) {
+    return this.contactService.resolveContacts(sessionId, dto.contactIds);
   }
 
   @Delete('saved/:id')

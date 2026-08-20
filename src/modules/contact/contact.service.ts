@@ -50,6 +50,64 @@ export class ContactService {
     return this.getEngine(sessionId).resolveContactPhone(contactId);
   }
 
+  async resolveContacts(sessionId: string, contactIds: string[]) {
+    const engine = this.getEngine(sessionId);
+    const uniqueIds = [...new Set(contactIds.map(id => id.trim()).filter(Boolean))];
+    const savedContacts = await this.listSavedContacts(sessionId);
+
+    let engineContacts: Awaited<ReturnType<IWhatsAppEngine['getContacts']>> = [];
+    try {
+      engineContacts = await engine.getContacts();
+    } catch {
+      // Phone resolution below can still succeed when the contact-list cache is unavailable.
+    }
+
+    const contactsById = new Map(engineContacts.map(contact => [contact.id, contact]));
+    const contactsByNumber = new Map<string, (typeof engineContacts)[number]>();
+    for (const contact of engineContacts) {
+      const number = this.normalizeDigits(contact.number);
+      if (number) contactsByNumber.set(number, contact);
+    }
+    const savedByNumber = new Map<string, SavedContact>();
+    for (const contact of savedContacts) {
+      const number = this.normalizeDigits(contact.number);
+      if (number) savedByNumber.set(number, contact);
+    }
+    const resolved: Array<{ contactId: string; phone: string | null; name: string | null }> = [];
+
+    // Small batches avoid flooding the WhatsApp page context while still resolving a full inbox quickly.
+    for (let index = 0; index < uniqueIds.length; index += 4) {
+      const batch = uniqueIds.slice(index, index + 4);
+      const batchResults = await Promise.all(
+        batch.map(async contactId => {
+          const directContact = contactsById.get(contactId);
+          let phone: string | null = null;
+          try {
+            phone = await engine.resolveContactPhone(contactId);
+          } catch {
+            phone = null;
+          }
+
+          const normalizedPhone = this.normalizeDigits(phone || '');
+          const phoneContact = normalizedPhone ? contactsByNumber.get(normalizedPhone) : undefined;
+          const savedContact = normalizedPhone ? savedByNumber.get(normalizedPhone) : undefined;
+          const name =
+            savedContact?.name?.trim() ||
+            directContact?.name?.trim() ||
+            directContact?.pushName?.trim() ||
+            phoneContact?.name?.trim() ||
+            phoneContact?.pushName?.trim() ||
+            null;
+
+          return { contactId, phone: normalizedPhone || null, name };
+        }),
+      );
+      resolved.push(...batchResults);
+    }
+
+    return resolved;
+  }
+
   getProfilePicture(sessionId: string, contactId: string) {
     return this.getEngine(sessionId).getProfilePicture(contactId);
   }
@@ -111,5 +169,9 @@ export class ContactService {
 
   private normalizeNumber(value: string) {
     return value.replace(/[^0-9+@._-]/g, '').trim();
+  }
+
+  private normalizeDigits(value: string) {
+    return value.replace(/\D/g, '');
   }
 }

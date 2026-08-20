@@ -6,7 +6,10 @@ import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interfa
 describe('ContactService', () => {
   const makeService = (engine: Partial<IWhatsAppEngine> | undefined) => {
     const sessionService = { getEngine: jest.fn().mockReturnValue(engine) } as unknown as SessionService;
-    return new ContactService(sessionService);
+    const savedContactRepository = {
+      find: jest.fn().mockResolvedValue([]),
+    };
+    return new ContactService(sessionService, savedContactRepository as never);
   };
 
   it('throws 400 when the session is not started', () => {
@@ -36,5 +39,24 @@ describe('ContactService', () => {
       '628123456789',
     );
     expect(resolveContactPhone).toHaveBeenCalledWith('123@lid');
+  });
+
+  it('resolves privacy IDs to a contact name and actual phone number', async () => {
+    const svc = makeService({
+      getContacts: jest.fn().mockResolvedValue([
+        {
+          id: '628123456789@c.us',
+          number: '628123456789',
+          name: 'Alice',
+          isMyContact: true,
+          isBlocked: false,
+        },
+      ]),
+      resolveContactPhone: jest.fn().mockResolvedValue('628123456789'),
+    });
+
+    await expect(svc.resolveContacts('s1', ['152695264563252@lid'])).resolves.toEqual([
+      { contactId: '152695264563252@lid', phone: '628123456789', name: 'Alice' },
+    ]);
   });
 });

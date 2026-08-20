@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ArrayMaxSize, IsArray, IsIn, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayNotEmpty, IsArray, IsIn, IsOptional, IsString, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class SavedContactItemDto {
@@ -29,4 +29,13 @@ export class SaveContactsDto {
   @ValidateNested({ each: true })
   @Type(() => SavedContactItemDto)
   contacts: SavedContactItemDto[];
+}
+
+export class ResolveContactsDto {
+  @ApiProperty({ type: [String], description: 'WhatsApp contact IDs to resolve to names and phone numbers' })
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(250)
+  @IsString({ each: true })
+  contactIds: string[];
 }

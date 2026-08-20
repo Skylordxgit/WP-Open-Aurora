@@ -764,6 +764,38 @@ describe('SessionService', () => {
       expect(result).toEqual(chats);
     });
 
+    it('merges stored conversations that are missing from the live WhatsApp chat list', async () => {
+      const session = createMockSession();
+      (repository.findOne as jest.Mock).mockResolvedValue(session);
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+      await service.start('sess-uuid-1');
+
+      mockEngine.getChats.mockResolvedValue([
+        { id: '111@c.us', name: 'Live chat', isGroup: false, unreadCount: 0, timestamp: 200 },
+      ]);
+      (messageRepository.find as jest.Mock).mockResolvedValue([
+        {
+          sessionId: 'sess-uuid-1',
+          chatId: '222@c.us',
+          body: 'Stored only',
+          timestamp: 100,
+          createdAt: new Date('2026-08-20T08:00:00Z'),
+        },
+      ]);
+
+      await expect(service.getChats('sess-uuid-1')).resolves.toEqual([
+        { id: '111@c.us', name: 'Live chat', isGroup: false, unreadCount: 0, timestamp: 200 },
+        {
+          id: '222@c.us',
+          name: '222@c.us',
+          isGroup: false,
+          unreadCount: 0,
+          timestamp: 100,
+          lastMessage: 'Stored only',
+        },
+      ]);
+    });
+
     it('should fall back to stored messages when engine.getChats hangs or fails', async () => {
       const session = createMockSession();
       (repository.findOne as jest.Mock).mockResolvedValue(session);
@@ -795,7 +827,7 @@ describe('SessionService', () => {
       expect(messageRepository.find).toHaveBeenCalledWith({
         where: { sessionId: 'sess-uuid-1' },
         order: { createdAt: 'DESC' },
-        take: 250,
+        take: 5000,
       });
       expect(result).toEqual([
         {

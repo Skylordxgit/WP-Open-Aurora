@@ -28,6 +28,8 @@ function createMockEngine() {
     getMessageReactions: jest.fn().mockResolvedValue([]),
     deleteMessage: jest.fn().mockResolvedValue(undefined),
     getChatHistory: jest.fn().mockResolvedValue([]),
+    resolveContactPhone: jest.fn().mockResolvedValue(null),
+    getNumberId: jest.fn().mockResolvedValue(null),
     sendChatState: jest.fn().mockResolvedValue(undefined),
   };
 }
@@ -554,6 +556,18 @@ describe('MessageService', () => {
       mockEngine.getChatHistory.mockResolvedValueOnce(fake);
       const result = await service.getChatHistory('sess-1', 'test@c.us');
       expect(result).toBe(fake);
+    });
+
+    it('retries history with the canonical phone chat when a privacy-id fetch fails', async () => {
+      const liveHistory = [{ id: 'm1', body: 'restored', fromMe: true }];
+      mockEngine.getChatHistory.mockRejectedValueOnce(new Error('Chat not found')).mockResolvedValueOnce(liveHistory);
+      mockEngine.resolveContactPhone.mockResolvedValueOnce('628123456789');
+      mockEngine.getNumberId.mockResolvedValueOnce('628123456789@c.us');
+
+      await expect(service.getChatHistory('sess-1', '152695264563252@lid', 100, true)).resolves.toBe(liveHistory);
+      expect(mockEngine.resolveContactPhone).toHaveBeenCalledWith('152695264563252@lid');
+      expect(mockEngine.getNumberId).toHaveBeenCalledWith('628123456789');
+      expect(mockEngine.getChatHistory).toHaveBeenLastCalledWith('628123456789@c.us', 100, true);
     });
   });
 

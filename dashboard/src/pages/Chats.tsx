@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import {
   sessionApi,
+  contactApi,
   messageApi,
   asMessageType,
   type Session,
@@ -117,12 +118,32 @@ const getMediaSrc = (media?: MessageMedia): string => {
 
 const getChatNumber = (chatId: string): string => chatId.split('@')[0];
 
-const getChatDisplayName = (chat: Pick<Chat, 'id' | 'name'>): string => {
+const getChatDisplayName = (chat: Pick<Chat, 'id' | 'name' | 'displayName' | 'phone'>): string => {
+  const resolvedName = chat.displayName?.trim();
+  if (resolvedName) return resolvedName;
+
   const trimmedName = chat.name?.trim();
   if (trimmedName && !trimmedName.includes('@')) {
     return trimmedName;
   }
+
+  if (chat.phone?.trim()) return chat.phone.trim();
+  if (chat.id.endsWith('@lid')) return 'WhatsApp contact';
   return getChatNumber(chat.id);
+};
+
+const loadStoredMessageHistory = async (sessionId: string, chatId: string, limit: number) => {
+  const messages: ChatMessage[] = [];
+  let total = 0;
+
+  for (let offset = 0; offset < limit; offset += INITIAL_HISTORY_LIMIT) {
+    const page = await sessionApi.getChatMessages(sessionId, chatId, INITIAL_HISTORY_LIMIT, offset);
+    messages.push(...page.messages);
+    total = page.total;
+    if (page.messages.length === 0 || messages.length >= total) break;
+  }
+
+  return { messages: messages.slice(0, limit), total };
 };
 
 const messageIdentity = (message: ChatMessageView): string => message.waMessageId || message.id;
@@ -185,6 +206,8 @@ const mergeMessageHistory = (...collections: ChatMessageView[][]): ChatMessageVi
       merged.set(key, {
         ...existing,
         ...message,
+        body: message.body?.trim() ? message.body : existing.body,
+        type: message.type === 'unknown' && existing.type !== 'unknown' ? existing.type : message.type,
         status: mergeDeliveryStatus(existing.status, message.status) || message.status,
         metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       });
@@ -239,6 +262,7 @@ export function Chats() {
   const roomMessagesRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messageRequestRef = useRef(0);
+  const contactResolutionRequestRef = useRef(0);
   const shouldScrollToBottomRef = useRef(false);
   const preservedScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const [replyingTo, setReplyingTo] = useState<ChatMessageView | null>(null);
@@ -289,11 +313,36 @@ export function Chats() {
   const loadChats = useCallback(
     async (sessionId: string) => {
       if (!sessionId) return;
+      const resolutionRequestId = ++contactResolutionRequestRef.current;
       try {
         setLoadingChats(true);
         const data = await sessionApi.getChats(sessionId);
         const sorted = [...data].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
         setChats(sorted);
+
+        const privacyContactIds = sorted.filter(chat => !chat.isGroup && chat.id.endsWith('@lid')).map(chat => chat.id);
+        if (privacyContactIds.length > 0) {
+          void contactApi
+            .resolve(sessionId, privacyContactIds)
+            .then(resolvedContacts => {
+              if (resolutionRequestId !== contactResolutionRequestRef.current) return;
+              const resolvedById = new Map(resolvedContacts.map(contact => [contact.contactId, contact]));
+              const enrichChat = (chat: Chat): Chat => {
+                const resolved = resolvedById.get(chat.id);
+                if (!resolved) return chat;
+                return {
+                  ...chat,
+                  displayName: resolved.name || resolved.phone || undefined,
+                  phone: resolved.phone || undefined,
+                };
+              };
+              setChats(current => current.map(enrichChat));
+              setActiveChat(current => (current ? enrichChat(current) : current));
+            })
+            .catch(() => {
+              // Keep the neutral "WhatsApp contact" label when WhatsApp cannot resolve a privacy ID.
+            });
+        }
       } catch (err) {
         showErrorToast(t('chats.errors.loadChats'), err instanceof Error ? err.message : undefined);
         setChats([]);
@@ -486,7 +535,7 @@ export function Chats() {
         }
 
         const [storedResult, liveResult] = await Promise.allSettled([
-          sessionApi.getChatMessages(selectedSessionId, chatId, INITIAL_HISTORY_LIMIT),
+          loadStoredMessageHistory(selectedSessionId, chatId, limit),
           sessionApi.getLiveChatHistory(selectedSessionId, chatId, limit, false),
         ]);
 
@@ -504,7 +553,9 @@ export function Chats() {
         setHistoryLimit(limit);
         setHistorySource(liveResult.status === 'fulfilled' ? 'live' : 'stored');
         setCanLoadOlder(
-          liveResult.status === 'fulfilled' && liveResult.value.length >= limit && limit < MAX_HISTORY_LIMIT,
+          limit < MAX_HISTORY_LIMIT &&
+            ((liveResult.status === 'fulfilled' && liveResult.value.length >= limit) ||
+              (storedResult.status === 'fulfilled' && storedResult.value.total > limit)),
         );
 
         if (liveResult.status === 'fulfilled') {
@@ -851,6 +902,8 @@ export function Chats() {
   const filteredChats = chats
     .filter(chat => {
       const matchesSearch =
+        chat.displayName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        chat.phone?.toLowerCase().includes(searchQuery.toLowerCase()) ||
         chat.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
         chat.id.toLowerCase().includes(searchQuery.toLowerCase());
 
@@ -1120,7 +1173,11 @@ export function Chats() {
                     <div className="room-avatar">{activeChat.isGroup ? <Users size={20} /> : <User size={20} />}</div>
                     <div className="room-contact-info">
                       <h3>{getChatDisplayName(activeChat)}</h3>
-                      {activeChat.name?.trim() && !activeChat.name.includes('@') ? (
+                      {activeChat.phone ? (
+                        <span>{activeChat.phone}</span>
+                      ) : activeChat.name?.trim() &&
+                        !activeChat.name.includes('@') &&
+                        !activeChat.id.endsWith('@lid') ? (
                         <span>{getChatNumber(activeChat.id)}</span>
                       ) : null}
                       <div className="room-contact-meta">
