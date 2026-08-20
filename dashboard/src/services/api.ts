@@ -182,6 +182,9 @@ export interface BulkMessageOptions {
   delayBetweenMessages?: number;
   randomizeDelay?: boolean;
   stopOnError?: boolean;
+  sourceSessionIds?: string[];
+  rotateAfterCount?: number;
+  shuffleSenders?: boolean;
 }
 
 export interface BulkMessageBatchResponse {
@@ -204,6 +207,8 @@ export interface BulkMessageBatchStatus {
   };
   results: Array<{
     chatId: string;
+    sourceSessionId?: string;
+    sourceSessionName?: string;
     status: string;
     messageId?: string;
     sentAt?: string;

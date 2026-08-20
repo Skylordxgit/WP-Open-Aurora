@@ -134,7 +134,7 @@
 
 .bulk-options-grid {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto auto;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 1rem;
   align-items: end;
   margin-bottom: 1.25rem;
@@ -288,6 +288,12 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-light);
+}
+
+.bulk-result-session {
+  margin-top: 0.2rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 
 .bulk-result-item p {

@@ -39,6 +39,9 @@ export function BulkMessaging() {
   const [delayBetweenMessages, setDelayBetweenMessages] = useState(3000);
   const [randomizeDelay, setRandomizeDelay] = useState(true);
   const [stopOnError, setStopOnError] = useState(false);
+  const [selectedSenderSessionIds, setSelectedSenderSessionIds] = useState<string[]>([]);
+  const [rotateAfterCount, setRotateAfterCount] = useState(5);
+  const [shuffleSenders, setShuffleSenders] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +56,21 @@ export function BulkMessaging() {
       setSessionId(sessions[0].id);
     }
   }, [sessions, sessionId]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setSelectedSenderSessionIds([]);
+      return;
+    }
+
+    setSelectedSenderSessionIds(current => {
+      const next = current.filter(id => sessions.some(session => session.id === id));
+      if (!next.includes(sessionId)) {
+        return [sessionId, ...next];
+      }
+      return next;
+    });
+  }, [sessionId, sessions]);
 
   useEffect(() => {
     if (recipientType !== 'group') {
@@ -136,6 +154,7 @@ export function BulkMessaging() {
       : new Set([...personalRecipients, ...selectedSavedContacts.map(contact => contact.number)]).size;
   const activeStatus = batchStatus?.status ?? batchResponse?.status ?? null;
   const batchIsActive = activeStatus === 'PENDING' || activeStatus === 'PROCESSING';
+  const senderCount = Math.max(1, selectedSenderSessionIds.length);
 
   const resolveChatIds = async () => {
     if (recipientType === 'group') {
@@ -209,6 +228,9 @@ export function BulkMessaging() {
           delayBetweenMessages,
           randomizeDelay,
           stopOnError,
+          sourceSessionIds: selectedSenderSessionIds.length > 0 ? selectedSenderSessionIds : [sessionId],
+          rotateAfterCount,
+          shuffleSenders,
         },
       });
 
@@ -277,6 +299,38 @@ export function BulkMessaging() {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="bulk-form-group">
+            <label>Sending numbers</label>
+            <div className="bulk-checkbox-list">
+              {sessions.length === 0 && <p className="bulk-hint">{t('bulkMessaging.noReadySessions')}</p>}
+              {sessions.map(session => {
+                const checked = selectedSenderSessionIds.includes(session.id);
+                const isPrimary = session.id === sessionId;
+                return (
+                  <label key={session.id} className="bulk-checkbox-item">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={isPrimary}
+                      onChange={() =>
+                        setSelectedSenderSessionIds(current =>
+                          checked ? current.filter(item => item !== session.id) : [...current, session.id],
+                        )
+                      }
+                    />
+                    <span>
+                      {session.name} ({session.phone || t('bulkMessaging.sessionOptionPhoneNone')})
+                      {isPrimary ? ' - primary' : ''}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            <span className="bulk-hint">
+              Select one sender for normal bulk send, or multiple senders to rotate automatically across numbers.
+            </span>
           </div>
 
           <div className="bulk-form-group">
@@ -407,6 +461,18 @@ export function BulkMessaging() {
                 onChange={event => setDelayBetweenMessages(Number(event.target.value))}
               />
             </div>
+            <div className="bulk-form-group">
+              <label>Rotate after messages</label>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                step={1}
+                value={rotateAfterCount}
+                onChange={event => setRotateAfterCount(Number(event.target.value))}
+                disabled={senderCount < 2}
+              />
+            </div>
             <label className="bulk-switch">
               <input type="checkbox" checked={randomizeDelay} onChange={event => setRandomizeDelay(event.target.checked)} />
               <span>{t('bulkMessaging.randomizeDelay')}</span>
@@ -415,10 +481,21 @@ export function BulkMessaging() {
               <input type="checkbox" checked={stopOnError} onChange={event => setStopOnError(event.target.checked)} />
               <span>{t('bulkMessaging.stopOnError')}</span>
             </label>
+            <label className="bulk-switch">
+              <input
+                type="checkbox"
+                checked={shuffleSenders}
+                onChange={event => setShuffleSenders(event.target.checked)}
+                disabled={senderCount < 2}
+              />
+              <span>Shuffle selected senders</span>
+            </label>
           </div>
 
           <div className="bulk-compose-footer">
-            <span className="bulk-count">{t('bulkMessaging.recipientCount', { count: recipientCount })}</span>
+            <span className="bulk-count">
+              {t('bulkMessaging.recipientCount', { count: recipientCount })} • {senderCount} sender{senderCount === 1 ? '' : 's'}
+            </span>
             <button
               className="bulk-send-btn"
               type="button"
@@ -482,6 +559,11 @@ export function BulkMessaging() {
                       <div>
                         <strong>{result.chatId}</strong>
                         <p>{result.error?.message ?? result.messageId ?? 'Sent successfully'}</p>
+                        {result.sourceSessionName || result.sourceSessionId ? (
+                          <p className="bulk-result-session">
+                            Via {result.sourceSessionName || result.sourceSessionId}
+                          </p>
+                        ) : null}
                       </div>
                       <span className={`bulk-result-badge bulk-result-badge--${result.status.toLowerCase()}`}>
                         {result.status}

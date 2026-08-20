@@ -10,6 +10,8 @@ import {
   Min,
   Max,
   ArrayMaxSize,
+  ArrayMinSize,
+  IsUUID,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -77,6 +79,32 @@ class BulkMessageOptionsDto {
   @IsOptional()
   @IsBoolean()
   stopOnError?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Specific session IDs that should be used as senders for this batch. Defaults to the route session only.',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(20)
+  @IsUUID('4', { each: true })
+  sourceSessionIds?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Rotate to the next sender after this many messages. Only applies when multiple sender sessions are selected.',
+    default: 5,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(100)
+  rotateAfterCount?: number;
+
+  @ApiPropertyOptional({ description: 'Shuffle the selected sender order before batch processing starts.', default: false })
+  @IsOptional()
+  @IsBoolean()
+  shuffleSenders?: boolean;
 }
 
 export class SendBulkMessageDto {

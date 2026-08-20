@@ -23,6 +23,12 @@ interface BulkMessageContent {
   document?: { url?: string; base64?: string; mimetype?: string; filename?: string };
 }
 
+interface SenderConfig {
+  sourceSessionIds: string[];
+  rotateAfterCount: number;
+  shuffleSenders: boolean;
+}
+
 /**
  * Resolve a batch's terminal status, in precedence order:
  *  - cancelled (cancelBatch flipped the flag) → CANCELLED. Must win over the in-memory PROCESSING
@@ -85,10 +91,15 @@ export class BulkMessageService implements OnApplicationBootstrap {
       throw new BadRequestException(`Batch ID '${batchId}' already exists`);
     }
 
+    const senderConfig = await this.resolveSenderConfig(sessionId, dto.options?.sourceSessionIds, dto.options?.rotateAfterCount, dto.options?.shuffleSenders);
+
     const options = {
       delayBetweenMessages: dto.options?.delayBetweenMessages ?? 3000,
       randomizeDelay: dto.options?.randomizeDelay ?? true,
       stopOnError: dto.options?.stopOnError ?? false,
+      sourceSessionIds: senderConfig.sourceSessionIds,
+      rotateAfterCount: senderConfig.rotateAfterCount,
+      shuffleSenders: senderConfig.shuffleSenders,
     };
 
     const progress: BatchProgress = {
@@ -172,16 +183,15 @@ export class BulkMessageService implements OnApplicationBootstrap {
     batch.startedAt = new Date();
     await this.batchRepository.save(batch);
 
-    const engine = this.sessionService.getEngine(batch.sessionId);
-    if (!engine) {
-      batch.status = BatchStatus.FAILED;
-      batch.completedAt = new Date();
-      await this.batchRepository.save(batch);
-      return;
-    }
-
     const results: BatchMessageResult[] = batch.results || [];
     let stoppedOnError = false;
+    const senderIds = batch.options?.sourceSessionIds?.length ? batch.options.sourceSessionIds : [batch.sessionId];
+    const rotateAfterCount = Math.max(1, batch.options?.rotateAfterCount ?? 5);
+    const senderMetadata = new Map(
+      await Promise.all(
+        senderIds.map(async id => [id, await this.sessionService.findOne(id).catch(() => null)] as const),
+      ),
+    );
 
     for (let i = batch.currentIndex; i < batch.messages.length; i++) {
       // Check for cancellation
@@ -191,12 +201,21 @@ export class BulkMessageService implements OnApplicationBootstrap {
       }
 
       const msg = batch.messages[i];
+      const sourceSessionId = senderIds[Math.floor(i / rotateAfterCount) % senderIds.length] || batch.sessionId;
+      const senderSession = senderMetadata.get(sourceSessionId) || null;
       const result: BatchMessageResult = {
         chatId: msg.chatId,
+        sourceSessionId,
+        sourceSessionName: senderSession?.name,
         status: BatchMessageStatus.PENDING,
       };
 
       try {
+        const engine = this.sessionService.getEngine(sourceSessionId);
+        if (!engine) {
+          throw new Error(`Sender session '${senderSession?.name || sourceSessionId}' is not active`);
+        }
+
         // Apply template variables
         const content: BulkMessageContent = this.applyVariables(msg.content, msg.variables);
 
@@ -209,7 +228,9 @@ export class BulkMessageService implements OnApplicationBootstrap {
         batch.progress.sent++;
         batch.progress.pending--;
 
-        this.logger.debug(`Batch ${batch.batchId}: Sent message ${i + 1}/${batch.messages.length} to ${msg.chatId}`);
+        this.logger.debug(
+          `Batch ${batch.batchId}: Sent message ${i + 1}/${batch.messages.length} to ${msg.chatId} via ${sourceSessionId}`,
+        );
       } catch (error) {
         result.status = BatchMessageStatus.FAILED;
         result.error = {
@@ -219,7 +240,9 @@ export class BulkMessageService implements OnApplicationBootstrap {
         batch.progress.failed++;
         batch.progress.pending--;
 
-        this.logger.warn(`Batch ${batch.batchId}: Failed message ${i + 1} to ${msg.chatId}: ${String(error)}`);
+        this.logger.warn(
+          `Batch ${batch.batchId}: Failed message ${i + 1} to ${msg.chatId} via ${sourceSessionId}: ${String(error)}`,
+        );
 
         if (batch.options.stopOnError) {
           batch.status = BatchStatus.FAILED;
@@ -343,5 +366,42 @@ export class BulkMessageService implements OnApplicationBootstrap {
 
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private async resolveSenderConfig(
+    routeSessionId: string,
+    sourceSessionIds?: string[],
+    rotateAfterCount?: number,
+    shuffleSenders?: boolean,
+  ): Promise<SenderConfig> {
+    const deduped = Array.from(new Set([routeSessionId, ...(sourceSessionIds || [])].filter(Boolean)));
+    const sessions = await Promise.all(
+      deduped.map(async id => ({
+        id,
+        session: await this.sessionService.findOne(id).catch(() => null),
+        engine: this.sessionService.getEngine(id),
+      })),
+    );
+
+    const invalid = sessions.filter(item => !item.session || !item.engine).map(item => item.id);
+    if (invalid.length > 0) {
+      throw new BadRequestException(
+        `Selected sender sessions are not ready: ${invalid.join(', ')}`,
+      );
+    }
+
+    const orderedIds = deduped.slice();
+    if (shuffleSenders && orderedIds.length > 1) {
+      for (let index = orderedIds.length - 1; index > 0; index--) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [orderedIds[index], orderedIds[swapIndex]] = [orderedIds[swapIndex], orderedIds[index]];
+      }
+    }
+
+    return {
+      sourceSessionIds: orderedIds,
+      rotateAfterCount: Math.max(1, rotateAfterCount ?? 5),
+      shuffleSenders: !!shuffleSenders,
+    };
   }
 }

@@ -19,6 +19,8 @@ export enum BatchMessageStatus {
 
 export interface BatchMessageResult {
   chatId: string;
+  sourceSessionId?: string;
+  sourceSessionName?: string;
   status: BatchMessageStatus;
   messageId?: string;
   error?: {
@@ -63,6 +65,9 @@ export class MessageBatch {
     delayBetweenMessages: number;
     randomizeDelay: boolean;
     stopOnError: boolean;
+    sourceSessionIds?: string[];
+    rotateAfterCount?: number;
+    shuffleSenders?: boolean;
   };
 
   @Column({ type: jsonColumnType(), nullable: true })
