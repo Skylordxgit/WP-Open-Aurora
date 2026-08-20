@@ -96,6 +96,16 @@ const getMediaSrc = (media?: MessageMedia): string => {
   return `data:${media.mimetype};base64,${media.data}`;
 };
 
+const getChatNumber = (chatId: string): string => chatId.split('@')[0];
+
+const getChatDisplayName = (chat: Pick<Chat, 'id' | 'name'>): string => {
+  const trimmedName = chat.name?.trim();
+  if (trimmedName && !trimmedName.includes('@')) {
+    return trimmedName;
+  }
+  return getChatNumber(chat.id);
+};
+
 export function Chats() {
   const { t } = useTranslation();
   useDocumentTitle(t('nav.chats'));
@@ -854,8 +864,8 @@ export function Chats() {
 
                       <div className="chat-item-info">
                         <div className="chat-item-top">
-                          <span className="chat-item-name" title={chat.name || chat.id}>
-                            {chat.name || chat.id.split('@')[0]}
+                          <span className="chat-item-name" title={getChatDisplayName(chat)}>
+                            {getChatDisplayName(chat)}
                           </span>
                           {chat.timestamp && (
                             <span className="chat-item-time">{formatChatTime(chat.timestamp)}</span>
@@ -893,8 +903,8 @@ export function Chats() {
                       {activeChat.isGroup ? <Users size={20} /> : <User size={20} />}
                     </div>
                     <div className="room-contact-info">
-                      <h3>{activeChat.name || activeChat.id.split('@')[0]}</h3>
-                      <span>{activeChat.id}</span>
+                      <h3>{getChatDisplayName(activeChat)}</h3>
+                      {activeChat.name?.trim() && !activeChat.name.includes('@') ? <span>{getChatNumber(activeChat.id)}</span> : null}
                       <div className="room-contact-meta">
                         <span>{activeChat.isGroup ? 'Shared workspace' : '1:1 conversation'}</span>
                         <span>{activeChatMessageCount} messages loaded</span>
@@ -1142,7 +1152,7 @@ export function Chats() {
                           name:
                             replyingTo.direction === 'outgoing'
                               ? t('chats.you')
-                              : activeChat.name || activeChat.id.split('@')[0],
+                              : getChatDisplayName(activeChat),
                         })}
                       </div>
                       <div className="replying-to-body">
