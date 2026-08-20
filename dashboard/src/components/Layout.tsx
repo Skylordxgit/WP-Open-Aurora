@@ -69,7 +69,7 @@ export function Layout({ onLogout, omegaRole }: LayoutProps) {
 
   const navItems = allNavItems.filter(item => item.roles.includes(omegaRole));
 
-  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState(true);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const [isLanguageMenuOpen, setIsLanguageMenuOpen] = useState(false);
