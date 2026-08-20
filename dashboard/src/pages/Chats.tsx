@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
-import { Trans, useTranslation } from 'react-i18next';
+import { useTranslation } from 'react-i18next';
 import {
   Search,
   Send,
@@ -277,6 +277,7 @@ export function Chats() {
   const [replyingTo, setReplyingTo] = useState<ChatMessageView | null>(null);
   const activeChatId = activeChat?.id;
   const selectedSession = sessions.find(session => session.id === selectedSessionId) || null;
+  const hasSessions = sessions.length > 0;
   const isSessionReady = selectedSession?.status === 'ready';
 
   // Popular emojis
@@ -1093,7 +1094,9 @@ export function Chats() {
     });
 
   const inboxTitle =
-    inboxView === 'unread'
+    !hasSessions
+      ? 'Chat workspace'
+      : inboxView === 'unread'
       ? 'Unread queue'
       : inboxView === 'direct'
         ? 'Direct conversations'
@@ -1102,7 +1105,9 @@ export function Chats() {
           : selectedSession?.name || 'Inbox';
 
   const inboxSubtitle =
-    inboxView === 'unread'
+    !hasSessions
+      ? 'Connect a WhatsApp session to load conversations here.'
+      : inboxView === 'unread'
       ? `${totalUnread} unread messages waiting for action`
       : `${filteredChats.length} conversations available in this workspace`;
 
@@ -1125,16 +1130,6 @@ export function Chats() {
           <Loader2 className="animate-spin" size={32} />
           <p>{t('common.loading')}</p>
         </div>
-      ) : sessions.length === 0 ? (
-        <div className="chats-error-state">
-          <AlertCircle size={48} className="text-warn" />
-          <h3>{t('chats.noSessionsTitle')}</h3>
-          <p>
-            <Trans i18nKey="chats.noSessionsDesc">
-              Please connect a WhatsApp session from the <strong>Sessions</strong> menu first to use the chat feature.
-            </Trans>
-          </p>
-        </div>
       ) : (
         <div className="chats-layout">
           <aside className="chats-rail">
@@ -1153,24 +1148,31 @@ export function Chats() {
               <div className="chats-rail-card">
                 <div className="chats-rail-card-top">
                   <div>
-                    <div className="chats-rail-card-title">{selectedSession?.name || 'Session'}</div>
-                    <div className="chats-rail-card-subtitle">{selectedSession?.phone || t('chats.noPhone')}</div>
+                    <div className="chats-rail-card-title">{selectedSession?.name || 'No session connected'}</div>
+                    <div className="chats-rail-card-subtitle">
+                      {selectedSession?.phone || 'Connect a device from the Sessions menu'}
+                    </div>
                   </div>
-                  <span className={`chats-session-badge ${isSessionReady ? 'online' : 'syncing'}`}>
+                  <span className={`chats-session-badge ${hasSessions ? (isSessionReady ? 'online' : 'syncing') : 'offline'}`}>
                     <Wifi size={12} />
-                    {isSessionReady ? 'Live' : 'Syncing'}
+                    {hasSessions ? (isSessionReady ? 'Live' : 'Syncing') : 'Offline'}
                   </span>
                 </div>
                 <select
                   value={selectedSessionId}
                   onChange={e => setSelectedSessionId(e.target.value)}
                   className="session-selector"
+                  disabled={!hasSessions}
                 >
-                  {sessions.map(s => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} ({s.phone || t('chats.noPhone')})
-                    </option>
-                  ))}
+                  {hasSessions ? (
+                    sessions.map(s => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.phone || t('chats.noPhone')})
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">No connected sessions</option>
+                  )}
                 </select>
               </div>
             </div>
@@ -1182,6 +1184,7 @@ export function Chats() {
                   type="button"
                   className={`chats-rail-nav-item ${inboxView === 'all' ? 'active' : ''}`}
                   onClick={() => setInboxView('all')}
+                  disabled={!hasSessions}
                 >
                   <span className="chats-rail-nav-main">
                     <MessageSquare size={18} />
@@ -1193,6 +1196,7 @@ export function Chats() {
                   type="button"
                   className={`chats-rail-nav-item ${inboxView === 'unread' ? 'active' : ''}`}
                   onClick={() => setInboxView('unread')}
+                  disabled={!hasSessions}
                 >
                   <span className="chats-rail-nav-main">
                     <Clock3 size={18} />
@@ -1204,6 +1208,7 @@ export function Chats() {
                   type="button"
                   className={`chats-rail-nav-item ${inboxView === 'direct' ? 'active' : ''}`}
                   onClick={() => setInboxView('direct')}
+                  disabled={!hasSessions}
                 >
                   <span className="chats-rail-nav-main">
                     <Phone size={18} />
@@ -1215,6 +1220,7 @@ export function Chats() {
                   type="button"
                   className={`chats-rail-nav-item ${inboxView === 'groups' ? 'active' : ''}`}
                   onClick={() => setInboxView('groups')}
+                  disabled={!hasSessions}
                 >
                   <span className="chats-rail-nav-main">
                     <Users size={18} />
@@ -1230,7 +1236,7 @@ export function Chats() {
               <div className="chats-rail-stats">
                 <div className="chats-rail-stat">
                   <span>WhatsApp</span>
-                  <strong>{isSessionReady ? 'Online' : 'Reconnecting'}</strong>
+                  <strong>{hasSessions ? (isSessionReady ? 'Online' : 'Reconnecting') : 'Not connected'}</strong>
                 </div>
                 <div className="chats-rail-stat">
                   <span>Unread</span>
@@ -1266,12 +1272,14 @@ export function Chats() {
                   placeholder={t('chats.searchPlaceholder')}
                   value={searchQuery}
                   onChange={e => setSearchQuery(e.target.value)}
+                  disabled={!hasSessions}
                 />
               </div>
               <button
                 type="button"
                 className={`chats-toolbar-chip ${inboxView === 'all' ? 'active' : ''}`}
                 onClick={() => setInboxView('all')}
+                disabled={!hasSessions}
               >
                 Open
               </button>
@@ -1279,11 +1287,12 @@ export function Chats() {
                 type="button"
                 className="chats-toolbar-chip"
                 onClick={() => setSortMode(current => (current === 'recent' ? 'oldest' : 'recent'))}
+                disabled={!hasSessions}
               >
                 <ArrowUpDown size={15} />
                 {sortMode === 'recent' ? 'Recent first' : 'Started first'}
               </button>
-              <button type="button" className="chats-toolbar-icon" aria-label="Filters">
+              <button type="button" className="chats-toolbar-icon" aria-label="Filters" disabled={!hasSessions}>
                 <Funnel size={16} />
               </button>
             </div>
@@ -1293,6 +1302,11 @@ export function Chats() {
                 <div className="chats-list-loading">
                   <Loader2 className="animate-spin" size={24} />
                   <span>{t('chats.loadingChats')}</span>
+                </div>
+              ) : !hasSessions ? (
+                <div className="chats-list-empty">
+                  <AlertCircle size={40} className="placeholder-icon" />
+                  <span>Connect a WhatsApp session to populate this inbox.</span>
                 </div>
               ) : filteredChats.length === 0 ? (
                 <div className="chats-list-empty">
@@ -1339,7 +1353,25 @@ export function Chats() {
           </section>
 
           <main className="chats-room">
-            {activeChat ? (
+            {!hasSessions ? (
+              <div className="chats-room-placeholder">
+                <div className="chats-room-placeholder-orb">
+                  <MessageSquare size={80} className="placeholder-icon" />
+                </div>
+                <h2>Chat interface ready</h2>
+                <p>Your operators can stay on this screen. As soon as a WhatsApp session is connected, chats and contacts will load here automatically.</p>
+                <div className="chats-placeholder-grid">
+                  <div className="chats-placeholder-card">
+                    <strong>Keep the workspace visible</strong>
+                    <span>The inbox, conversation pane, and reply area remain in place instead of switching to a blocking dashboard.</span>
+                  </div>
+                  <div className="chats-placeholder-card">
+                    <strong>Connect from Sessions</strong>
+                    <span>Scan or reconnect a device from the Sessions menu, then return here to continue with the same chat layout.</span>
+                  </div>
+                </div>
+              </div>
+            ) : activeChat ? (
               <div className="room-container">
                 <header className="room-header">
                   <div className="room-header-main">

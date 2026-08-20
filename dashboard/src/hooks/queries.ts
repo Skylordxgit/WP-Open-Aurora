@@ -1,12 +1,14 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   sessionApi,
+  statsApi,
   webhookApi,
   templateApi,
   apiKeyApi,
   auditApi,
   infraApi,
   pluginsApi,
+  type DashboardPeriod,
   type Webhook,
   type TemplatePayload,
 } from '../services/api';
@@ -16,6 +18,8 @@ import {
 export const queryKeys = {
   sessions: ['sessions'] as const,
   sessionStats: ['sessions', 'stats'] as const,
+  dashboardStats: (params: { period: DashboardPeriod; startDate?: string; endDate?: string }) =>
+    ['dashboard', 'stats', params] as const,
   sessionGroups: (sessionId: string) => ['sessions', sessionId, 'groups'] as const,
   webhooks: ['webhooks'] as const,
   templates: (sessionId: string) => ['sessions', sessionId, 'templates'] as const,
@@ -42,6 +46,14 @@ export function useSessionStatsQuery() {
   return useQuery({
     queryKey: queryKeys.sessionStats,
     queryFn: sessionApi.getStats,
+    staleTime: 30_000,
+  });
+}
+
+export function useDashboardStatsQuery(params: { period: DashboardPeriod; startDate?: string; endDate?: string }) {
+  return useQuery({
+    queryKey: queryKeys.dashboardStats(params),
+    queryFn: () => statsApi.getOverview(params),
     staleTime: 30_000,
   });
 }

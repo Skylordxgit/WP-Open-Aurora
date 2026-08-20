@@ -38,6 +38,65 @@ export interface SessionStats {
   memoryUsage: { heapUsed: number; heapTotal: number; rss: number };
 }
 
+export type DashboardPeriod = 'today' | '7d' | '30d' | 'custom';
+
+export interface DashboardRange {
+  period: DashboardPeriod;
+  startDate: string;
+  endDate: string;
+  days: number;
+}
+
+export interface DashboardSessionPerformance {
+  sessionId: string;
+  name: string;
+  status: string;
+  phone?: string;
+  handledChats: number;
+  activeChats: number;
+  incoming: number;
+  outgoing: number;
+  failed: number;
+  avgResponseMinutes: number | null;
+  messagesPerDay: number;
+  lastResponseAt: string | null;
+  lastInboundAt: string | null;
+}
+
+export interface DashboardOverviewStats {
+  sessions: {
+    active: number;
+    total: number;
+    byStatus: Record<string, number>;
+  };
+  messages: {
+    sent: number;
+    received: number;
+    failed: number;
+    today: { sent: number; received: number };
+    selectedPeriod: {
+      period: DashboardPeriod;
+      sent: number;
+      received: number;
+      failed: number;
+      total: number;
+      handledChats: number;
+      activeChats: number;
+      avgResponseMinutes: number | null;
+      respondedChats: number;
+      pendingChats: number;
+    };
+  };
+  range: DashboardRange;
+  activitySeries: Array<{
+    label: string;
+    sent: number;
+    received: number;
+    handledChats: number;
+  }>;
+  sessionPerformance: DashboardSessionPerformance[];
+}
+
 export interface Webhook {
   id: string;
   sessionId: string;
@@ -464,6 +523,15 @@ export const sessionApi = {
       `/sessions/${id}/messages/${encodeURIComponent(chatId)}/history?${query.toString()}`,
       { timeoutMs: includeMedia ? 180000 : 90000 },
     );
+  },
+};
+
+export const statsApi = {
+  getOverview: (params: { period: DashboardPeriod; startDate?: string; endDate?: string }) => {
+    const query = new URLSearchParams({ period: params.period });
+    if (params.startDate) query.set('startDate', params.startDate);
+    if (params.endDate) query.set('endDate', params.endDate);
+    return request<DashboardOverviewStats>(`/stats/overview?${query.toString()}`);
   },
 };
 

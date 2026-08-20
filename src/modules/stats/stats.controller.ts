@@ -10,14 +10,14 @@ export class StatsController {
 
   @Get('overview')
   @ApiOperation({ summary: 'Get overall statistics' })
-  async getOverview() {
-    return this.statsService.getOverview();
+  async getOverview(@Query() query: StatsQueryDto) {
+    return this.statsService.getOverview(query);
   }
 
   @Get('messages')
   @ApiOperation({ summary: 'Get message statistics with time series' })
   async getMessageStats(@Query() query: StatsQueryDto) {
-    return this.statsService.getMessageStats(query.period || '24h');
+    return this.statsService.getMessageStats(query);
   }
 
   @Get('sessions/:sessionId')

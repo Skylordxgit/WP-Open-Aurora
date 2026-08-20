@@ -139,6 +139,11 @@
   color: #1d4ed8;
 }
 
+.chats-session-badge.offline {
+  background: rgba(148, 163, 184, 0.16);
+  color: #475569;
+}
+
 .chats-rail-nav {
   display: flex;
   flex-direction: column;
@@ -191,6 +196,20 @@
 
 .chats-rail-nav-item:hover {
   background: rgba(255, 255, 255, 0.72);
+}
+
+.chats-rail-nav-item:disabled,
+.chats-toolbar-chip:disabled,
+.chats-toolbar-icon:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.chats-rail-nav-item:disabled:hover,
+.chats-toolbar-chip:disabled:hover,
+.chats-toolbar-icon:disabled:hover {
+  background: transparent;
+  transform: none;
 }
 
 .chats-rail-nav-item.active {
@@ -283,6 +302,16 @@
 .session-selector:focus {
   border-color: #2563eb;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.session-selector:disabled,
+.chat-search-input input:disabled {
+  cursor: not-allowed;
+  color: #64748b;
+}
+
+.session-selector:disabled {
+  background: rgba(248, 250, 252, 0.92);
 }
 
 .chat-search-input {

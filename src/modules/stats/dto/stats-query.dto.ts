@@ -1,7 +1,15 @@
-import { IsOptional, IsIn } from 'class-validator';
+import { IsIn, IsISO8601, IsOptional } from 'class-validator';
 
 export class StatsQueryDto {
   @IsOptional()
-  @IsIn(['24h', '7d', '30d'])
-  period?: '24h' | '7d' | '30d' = '24h';
+  @IsIn(['today', '7d', '30d', 'custom'])
+  period?: 'today' | '7d' | '30d' | 'custom' = 'today';
+
+  @IsOptional()
+  @IsISO8601()
+  startDate?: string;
+
+  @IsOptional()
+  @IsISO8601()
+  endDate?: string;
 }
