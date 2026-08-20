@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from 'react';
+import { useState, useEffect, lazy, Suspense, type ComponentType } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
@@ -21,6 +21,8 @@ import { ClientApp } from './client/ClientApp';
 import './App.css';
 import './omega/styles/omega.css';
 
+const LAZY_RETRY_KEY = 'aurorawa_lazy_retry_path';
+
 function clearStoredApiKey() {
   localStorage.removeItem('openwa_api_key');
   sessionStorage.removeItem('openwa_api_key');
@@ -34,26 +36,52 @@ function setStoredOmegaRole(role: OmegaRole | null) {
   localStorage.removeItem('omega_user_role');
 }
 
-const Login = lazy(() => import('./pages/Login').then(m => ({ default: m.Login })));
-const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
-const Sessions = lazy(() => import('./pages/Sessions').then(m => ({ default: m.Sessions })));
-const Chats = lazy(() => import('./pages/Chats').then(m => ({ default: m.Chats })));
-const Webhooks = lazy(() => import('./pages/Webhooks').then(m => ({ default: m.Webhooks })));
-const Templates = lazy(() => import('./pages/Templates').then(m => ({ default: m.Templates })));
-const Logs = lazy(() => import('./pages/Logs').then(m => ({ default: m.Logs })));
-const ApiKeys = lazy(() => import('./pages/ApiKeys').then(m => ({ default: m.ApiKeys })));
-const Contacts = lazy(() => import('./pages/Contacts').then(m => ({ default: m.Contacts })));
-const BulkMessaging = lazy(() => import('./pages/BulkMessaging').then(m => ({ default: m.BulkMessaging })));
-const MessageTester = lazy(() => import('./pages/MessageTester').then(m => ({ default: m.MessageTester })));
-const Branding = lazy(() => import('./pages/Branding').then(m => ({ default: m.Branding })));
-const Infrastructure = lazy(() => import('./pages/Infrastructure').then(m => ({ default: m.Infrastructure })));
-const Plugins = lazy(() => import('./pages/Plugins'));
-const OmegaClients = lazy(() => import('./omega/pages/OmegaClients').then(m => ({ default: m.OmegaClients })));
-const OmegaClientForm = lazy(() => import('./omega/pages/OmegaClientForm').then(m => ({ default: m.OmegaClientForm })));
-const OmegaClientDetails = lazy(() => import('./omega/pages/OmegaClientDetails').then(m => ({ default: m.OmegaClientDetails })));
-const OmegaStaff = lazy(() => import('./omega/pages/OmegaStaff').then(m => ({ default: m.OmegaStaff })));
-const OmegaTeams = lazy(() => import('./omega/pages/OmegaTeams').then(m => ({ default: m.OmegaTeams })));
-const OmegaBot = lazy(() => import('./omega/pages/OmegaBot').then(m => ({ default: m.OmegaBot })));
+function lazyPage<TModule, TComponent extends ComponentType<any>>(
+  importer: () => Promise<TModule>,
+  pickDefault: (module: TModule) => { default: TComponent },
+) {
+  return lazy(async () => {
+    try {
+      const module = await importer();
+      if (typeof window !== 'undefined') {
+        sessionStorage.removeItem(LAZY_RETRY_KEY);
+      }
+      return pickDefault(module);
+    } catch (error) {
+      if (typeof window !== 'undefined') {
+        const retryPath = sessionStorage.getItem(LAZY_RETRY_KEY);
+        const currentPath = window.location.pathname;
+        if (retryPath !== currentPath) {
+          sessionStorage.setItem(LAZY_RETRY_KEY, currentPath);
+          window.location.reload();
+          return new Promise<never>(() => {});
+        }
+      }
+      throw error;
+    }
+  });
+}
+
+const Login = lazyPage(() => import('./pages/Login'), m => ({ default: m.Login }));
+const Dashboard = lazyPage(() => import('./pages/Dashboard'), m => ({ default: m.Dashboard }));
+const Sessions = lazyPage(() => import('./pages/Sessions'), m => ({ default: m.Sessions }));
+const Chats = lazyPage(() => import('./pages/Chats'), m => ({ default: m.Chats }));
+const Webhooks = lazyPage(() => import('./pages/Webhooks'), m => ({ default: m.Webhooks }));
+const Templates = lazyPage(() => import('./pages/Templates'), m => ({ default: m.Templates }));
+const Logs = lazyPage(() => import('./pages/Logs'), m => ({ default: m.Logs }));
+const ApiKeys = lazyPage(() => import('./pages/ApiKeys'), m => ({ default: m.ApiKeys }));
+const Contacts = lazyPage(() => import('./pages/Contacts'), m => ({ default: m.Contacts }));
+const BulkMessaging = lazyPage(() => import('./pages/BulkMessaging'), m => ({ default: m.BulkMessaging }));
+const MessageTester = lazyPage(() => import('./pages/MessageTester'), m => ({ default: m.MessageTester }));
+const Branding = lazyPage(() => import('./pages/Branding'), m => ({ default: m.Branding }));
+const Infrastructure = lazyPage(() => import('./pages/Infrastructure'), m => ({ default: m.Infrastructure }));
+const Plugins = lazyPage(() => import('./pages/Plugins'), m => ({ default: m.default }));
+const OmegaClients = lazyPage(() => import('./omega/pages/OmegaClients'), m => ({ default: m.OmegaClients }));
+const OmegaClientForm = lazyPage(() => import('./omega/pages/OmegaClientForm'), m => ({ default: m.OmegaClientForm }));
+const OmegaClientDetails = lazyPage(() => import('./omega/pages/OmegaClientDetails'), m => ({ default: m.OmegaClientDetails }));
+const OmegaStaff = lazyPage(() => import('./omega/pages/OmegaStaff'), m => ({ default: m.OmegaStaff }));
+const OmegaTeams = lazyPage(() => import('./omega/pages/OmegaTeams'), m => ({ default: m.OmegaTeams }));
+const OmegaBot = lazyPage(() => import('./omega/pages/OmegaBot'), m => ({ default: m.OmegaBot }));
 
 const queryClient = new QueryClient({
   defaultOptions: {
