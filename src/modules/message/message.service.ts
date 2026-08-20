@@ -1,16 +1,17 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, HttpException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SessionService } from '../session/session.service';
 import { SendTextMessageDto, SendMediaMessageDto, MessageResponseDto } from './dto';
 import { SendTemplateMessageDto } from './dto/send-template.dto';
-import { MediaInput, IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
+import { EngineStatus, MediaInput, IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 import { Message, MessageDirection, MessageStatus } from './entities/message.entity';
 import { HookManager } from '../../core/hooks';
 import { TemplateService } from '../template/template.service';
 import { renderTemplate } from '../../common/utils/template-render';
 import { createLogger } from '../../common/services/logger.service';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
+import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 
 export interface GetMessagesOptions {
   chatId?: string;
@@ -46,6 +47,7 @@ export class MessageService {
     const finalDto = (hookData as { input: SendTextMessageDto }).input;
 
     const engine = this.getEngine(sessionId);
+    const sendChatId = await this.resolveSendChatId(engine, finalDto.chatId);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -55,10 +57,10 @@ export class MessageService {
     });
 
     // Opt-in humanising "typing…" pause before the actual send (anti-automation signal).
-    await this.simulateTypingIfEnabled(engine, finalDto.chatId, finalDto.text);
+    await this.simulateTypingIfEnabled(engine, sendChatId, finalDto.text);
 
     try {
-      const result = await engine.sendTextMessage(finalDto.chatId, finalDto.text);
+      const result = await engine.sendTextMessage(sendChatId, finalDto.text);
 
       // Update with actual WhatsApp message ID and status
       message.waMessageId = result.id;
@@ -79,13 +81,19 @@ export class MessageService {
       await this.messageRepository.save(message);
 
       // Execute hook on failure
-      await this.hookManager.execute(
-        'message:failed',
-        { sessionId, error: error instanceof Error ? error.message : String(error), input: finalDto },
-        { sessionId, source: 'MessageService' },
-      );
+      try {
+        await this.hookManager.execute(
+          'message:failed',
+          { sessionId, error: error instanceof Error ? error.message : String(error), input: finalDto },
+          { sessionId, source: 'MessageService' },
+        );
+      } catch (hookError) {
+        this.logger.warn(
+          `message:failed hook error: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
+        );
+      }
 
-      throw error;
+      throw this.toClientFacingError(error, finalDto.chatId);
     }
   }
 
@@ -113,6 +121,7 @@ export class MessageService {
 
   async sendImage(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
+    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
     const media = this.buildMediaInput(dto);
 
     // Save message as pending BEFORE sending
@@ -126,7 +135,7 @@ export class MessageService {
     });
 
     try {
-      const result = await engine.sendImageMessage(dto.chatId, media);
+      const result = await engine.sendImageMessage(sendChatId, media);
 
       // Update with actual WhatsApp message ID and status
       message.waMessageId = result.id;
@@ -141,12 +150,13 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error);
+      throw this.toClientFacingError(error, dto.chatId);
     }
   }
 
   async sendVideo(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
+    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
     const media = this.buildMediaInput(dto);
 
     // Save message as pending BEFORE sending
@@ -160,7 +170,7 @@ export class MessageService {
     });
 
     try {
-      const result = await engine.sendVideoMessage(dto.chatId, media);
+      const result = await engine.sendVideoMessage(sendChatId, media);
 
       // Update with actual WhatsApp message ID and status
       message.waMessageId = result.id;
@@ -175,12 +185,13 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error);
+      throw this.toClientFacingError(error, dto.chatId);
     }
   }
 
   async sendAudio(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
+    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
     const media = this.buildMediaInput(dto);
 
     // Save message as pending BEFORE sending
@@ -193,7 +204,7 @@ export class MessageService {
     });
 
     try {
-      const result = await engine.sendAudioMessage(dto.chatId, media);
+      const result = await engine.sendAudioMessage(sendChatId, media);
 
       // Update with actual WhatsApp message ID and status
       message.waMessageId = result.id;
@@ -208,12 +219,13 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error);
+      throw this.toClientFacingError(error, dto.chatId);
     }
   }
 
   async sendDocument(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
+    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
     const media = this.buildMediaInput(dto);
 
     // Save message as pending BEFORE sending
@@ -227,7 +239,7 @@ export class MessageService {
     });
 
     try {
-      const result = await engine.sendDocumentMessage(dto.chatId, media);
+      const result = await engine.sendDocumentMessage(sendChatId, media);
 
       // Update with actual WhatsApp message ID and status
       message.waMessageId = result.id;
@@ -242,7 +254,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error);
+      throw this.toClientFacingError(error, dto.chatId);
     }
   }
 
@@ -284,6 +296,7 @@ export class MessageService {
     dto: { chatId: string; latitude: number; longitude: number; description?: string; address?: string },
   ): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
+    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -293,7 +306,7 @@ export class MessageService {
     });
 
     try {
-      const result = await engine.sendLocationMessage(dto.chatId, {
+      const result = await engine.sendLocationMessage(sendChatId, {
         latitude: dto.latitude,
         longitude: dto.longitude,
         description: dto.description,
@@ -313,7 +326,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error);
+      throw this.toClientFacingError(error, dto.chatId);
     }
   }
 
@@ -322,6 +335,7 @@ export class MessageService {
     dto: { chatId: string; contactName: string; contactNumber: string },
   ): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
+    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -331,7 +345,7 @@ export class MessageService {
     });
 
     try {
-      const result = await engine.sendContactMessage(dto.chatId, {
+      const result = await engine.sendContactMessage(sendChatId, {
         name: dto.contactName,
         number: dto.contactNumber,
       });
@@ -349,12 +363,13 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error);
+      throw this.toClientFacingError(error, dto.chatId);
     }
   }
 
   async sendSticker(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
+    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
     const media = this.buildMediaInput(dto);
 
     // Save message as pending BEFORE sending
@@ -367,7 +382,7 @@ export class MessageService {
     });
 
     try {
-      const result = await engine.sendStickerMessage(dto.chatId, media);
+      const result = await engine.sendStickerMessage(sendChatId, media);
 
       // Update with actual WhatsApp message ID and status
       message.waMessageId = result.id;
@@ -382,7 +397,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error);
+      throw this.toClientFacingError(error, dto.chatId);
     }
   }
 
@@ -391,6 +406,7 @@ export class MessageService {
     dto: { chatId: string; quotedMessageId: string; text: string },
   ): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
+    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
 
     // Resolve the quoted message body (best-effort) so the dashboard can render the reply preview.
     let quotedBody = '';
@@ -414,7 +430,7 @@ export class MessageService {
     });
 
     try {
-      const result = await engine.replyToMessage(dto.chatId, dto.quotedMessageId, dto.text);
+      const result = await engine.replyToMessage(sendChatId, dto.quotedMessageId, dto.text);
 
       // Update with actual WhatsApp message ID and status
       message.waMessageId = result.id;
@@ -429,7 +445,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error);
+      throw this.toClientFacingError(error, dto.chatId);
     }
   }
 
@@ -438,6 +454,8 @@ export class MessageService {
     dto: { fromChatId: string; toChatId: string; messageId: string },
   ): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
+    const fromChatId = await this.resolveSendChatId(engine, dto.fromChatId);
+    const toChatId = await this.resolveSendChatId(engine, dto.toChatId);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -447,7 +465,7 @@ export class MessageService {
     });
 
     try {
-      const result = await engine.forwardMessage(dto.fromChatId, dto.toChatId, dto.messageId);
+      const result = await engine.forwardMessage(fromChatId, toChatId, dto.messageId);
 
       // Update with actual WhatsApp message ID and status
       message.waMessageId = result.id;
@@ -462,7 +480,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error);
+      throw this.toClientFacingError(error, dto.toChatId);
     }
   }
 
@@ -603,7 +621,23 @@ export class MessageService {
     if (!engine) {
       throw new BadRequestException(`Session '${sessionId}' is not active. Start the session first.`);
     }
+    if (engine.getStatus() !== EngineStatus.READY) {
+      throw new EngineNotReadyError();
+    }
     return engine;
+  }
+
+  private async resolveSendChatId(engine: IWhatsAppEngine, chatId: string): Promise<string> {
+    if (!chatId.endsWith('@lid')) return chatId;
+
+    const phone = await this.resolveChatPhone(engine, chatId);
+    if (!phone) return chatId;
+
+    try {
+      return (await engine.getNumberId(phone)) || chatId;
+    } catch {
+      return chatId;
+    }
   }
 
   /**
@@ -632,9 +666,17 @@ export class MessageService {
    * caller-supplied internal/unsafe URL returns a client error instead of a 500.
    * All other errors pass through unchanged.
    */
-  private toClientFacingError(error: unknown): unknown {
+  private toClientFacingError(error: unknown, chatId?: string): unknown {
     if (error instanceof SsrfBlockedError) {
       return new BadRequestException(error.message);
+    }
+    if (error instanceof HttpException) {
+      return error;
+    }
+    if (chatId?.endsWith('@lid')) {
+      return new BadRequestException(
+        'WhatsApp could not resolve this contact to a sendable phone number. Wait for synchronization and try again.',
+      );
     }
     return error;
   }

@@ -483,6 +483,50 @@ describe('SessionService', () => {
       expect(messageRepository.save).toHaveBeenCalledWith(expect.objectContaining({ waMessageId: 'phone-out-1' }));
     });
 
+    it('attaches a canonical phone-id echo to the pending privacy-id row', async () => {
+      const pending = {
+        id: 'pending-1',
+        sessionId: 'sess-uuid-1',
+        chatId: '152695264563252@lid',
+        body: 'Canonical send',
+        type: 'text',
+        direction: 'outgoing',
+        status: 'pending',
+        metadata: {},
+      } as Message;
+      (messageRepository.findOne as jest.Mock)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(pending);
+      (hookManager.execute as jest.Mock).mockImplementation((_event: string, data: unknown) =>
+        Promise.resolve({ continue: true, data }),
+      );
+      const callbacks = await startAndCaptureCallbacks();
+
+      callbacks.onMessageCreate!(
+        makeMessage({
+          id: 'canonical-out-1',
+          from: 'me@c.us',
+          to: '628777888999@c.us',
+          chatId: '628777888999@c.us',
+          body: 'Canonical send',
+          fromMe: true,
+        }),
+      );
+      await flush();
+      await flush();
+
+      expect(messageRepository.create).not.toHaveBeenCalled();
+      expect(messageRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'pending-1',
+          chatId: '152695264563252@lid',
+          waMessageId: 'canonical-out-1',
+          status: 'sent',
+        }),
+      );
+    });
+
     it('scopes the ack status UPDATE by sessionId, not just waMessageId', async () => {
       const callbacks = await startAndCaptureCallbacks();
       expect(typeof callbacks.onMessageAck).toBe('function');

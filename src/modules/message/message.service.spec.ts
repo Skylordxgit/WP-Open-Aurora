@@ -9,11 +9,14 @@ import { HookManager } from '../../core/hooks';
 import { TemplateService } from '../template/template.service';
 import { Template } from '../template/entities/template.entity';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
+import { EngineStatus } from '../../engine/interfaces/whatsapp-engine.interface';
+import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 
 const mockEngineResult = { id: 'wa-msg-1', timestamp: 1706868000 };
 
 function createMockEngine() {
   return {
+    getStatus: jest.fn().mockReturnValue(EngineStatus.READY),
     sendTextMessage: jest.fn().mockResolvedValue(mockEngineResult),
     sendImageMessage: jest.fn().mockResolvedValue(mockEngineResult),
     sendVideoMessage: jest.fn().mockResolvedValue(mockEngineResult),
@@ -174,6 +177,42 @@ describe('MessageService', () => {
 
       await expect(service.sendText('inactive', { chatId: 'test@c.us', text: 'hello' })).rejects.toThrow(
         BadRequestException,
+      );
+    });
+
+    it('rejects before creating a pending row when the WhatsApp engine is not ready', async () => {
+      mockEngine.getStatus.mockReturnValue(EngineStatus.INITIALIZING);
+
+      await expect(service.sendText('sess-1', { chatId: 'test@c.us', text: 'hello' })).rejects.toBeInstanceOf(
+        EngineNotReadyError,
+      );
+      expect(repository.create).not.toHaveBeenCalled();
+      expect(mockEngine.sendTextMessage).not.toHaveBeenCalled();
+    });
+
+    it('sends a privacy-id chat through its canonical phone chat id', async () => {
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({
+        continue: true,
+        data: { input: { chatId: '152695264563252@lid', text: 'hello' } },
+      });
+      mockEngine.resolveContactPhone.mockResolvedValueOnce('628777888999');
+      mockEngine.getNumberId.mockResolvedValueOnce('628777888999@c.us');
+
+      await service.sendText('sess-1', { chatId: '152695264563252@lid', text: 'hello' });
+
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628777888999@c.us', 'hello');
+      expect(repository.create).toHaveBeenCalledWith(expect.objectContaining({ chatId: '152695264563252@lid' }));
+    });
+
+    it('returns a clear client error when an unresolved privacy-id send fails', async () => {
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({
+        continue: true,
+        data: { input: { chatId: '152695264563252@lid', text: 'hello' } },
+      });
+      mockEngine.sendTextMessage.mockRejectedValueOnce(new Error('Evaluation failed'));
+
+      await expect(service.sendText('sess-1', { chatId: '152695264563252@lid', text: 'hello' })).rejects.toThrow(
+        'WhatsApp could not resolve this contact to a sendable phone number',
       );
     });
   });

@@ -865,6 +865,22 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         });
       }
 
+      // Canonical sends may echo with a phone JID while the API pending row intentionally keeps the
+      // original privacy-id chat for dashboard continuity. Match that very recent row by body/type.
+      if (!stored) {
+        stored = await this.messageRepository.findOne({
+          where: {
+            sessionId,
+            body: outgoing.body,
+            type: outgoing.type,
+            direction: MessageDirection.OUTGOING,
+            status: MessageStatus.PENDING,
+            createdAt: MoreThan(new Date(Date.now() - 2 * 60 * 1000)),
+          },
+          order: { createdAt: 'DESC' },
+        });
+      }
+
       const incomingMetadata = this.buildStoredMessageMetadata(outgoing);
       if (stored) {
         stored.waMessageId = outgoing.id;

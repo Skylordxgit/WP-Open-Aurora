@@ -276,6 +276,8 @@ export function Chats() {
   const preservedScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const [replyingTo, setReplyingTo] = useState<ChatMessageView | null>(null);
   const activeChatId = activeChat?.id;
+  const selectedSession = sessions.find(session => session.id === selectedSessionId) || null;
+  const isSessionReady = selectedSession?.status === 'ready';
 
   // Popular emojis
   const popularEmojis = [
@@ -567,7 +569,16 @@ export function Chats() {
     [selectedSessionId],
   );
 
+  const handleSessionStatus = useCallback((event: { sessionId: string; status: string }) => {
+    setSessions(current =>
+      current.map(session =>
+        session.id === event.sessionId ? { ...session, status: event.status as Session['status'] } : session,
+      ),
+    );
+  }, []);
+
   const { isConnected, connectionFailed, reconnect, subscribe, unsubscribe } = useWebSocket({
+    onSessionStatus: handleSessionStatus,
     onMessage: handleIncomingMessage,
     onMessageAck: handleIncomingMessageAck,
     onMessageReaction: handleIncomingMessageReaction,
@@ -582,12 +593,38 @@ export function Chats() {
         'message.ack',
         'message.reaction',
         'message.revoked',
+        'session.status',
       ]);
       return () => {
         unsubscribe(selectedSessionId);
       };
     }
   }, [selectedSessionId, isConnected, subscribe, unsubscribe]);
+
+  // Keep readiness accurate even when Socket.IO is reconnecting. This prevents a stale READY badge
+  // from allowing sends after the WhatsApp engine has dropped, and recovers without a page refresh.
+  useEffect(() => {
+    if (!selectedSessionId) return;
+    let cancelled = false;
+
+    const refreshSession = async () => {
+      try {
+        const updated = await sessionApi.get(selectedSessionId);
+        if (!cancelled) {
+          setSessions(current => current.map(session => (session.id === updated.id ? updated : session)));
+        }
+      } catch {
+        // The existing API/session error surfaces remain authoritative; retry on the next interval.
+      }
+    };
+
+    void refreshSession();
+    const interval = window.setInterval(refreshSession, isConnected ? 15000 : 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [isConnected, selectedSessionId]);
 
   // 4. Merge live WhatsApp history with locally stored delivery state. Text arrives first so the
   // conversation is usable immediately; media is hydrated in a second request in the background.
@@ -867,6 +904,10 @@ export function Chats() {
   const handleSend = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!selectedSessionId || !activeChat || sending) return;
+    if (!isSessionReady) {
+      showWarningToast('WhatsApp is still synchronizing', 'Please wait for the session to reconnect before sending.');
+      return;
+    }
 
     const textToSend = messageInput.trim();
     if (!textToSend && !attachment) return;
@@ -972,6 +1013,15 @@ export function Chats() {
     } catch (err) {
       showErrorToast(t('chats.errors.send'), err instanceof Error ? err.message : undefined);
       setMessages(prev => prev.map(m => (m.id === tempId ? { ...m, status: 'failed' } : m)));
+      if (currentAttachment) {
+        setAttachment(currentAttachment);
+        if (currentAttachment.mimetype.startsWith('image/')) {
+          setPreviewUrl(URL.createObjectURL(currentAttachment.file));
+        }
+      } else {
+        setMessageInput(current => current || textToSend);
+      }
+      if (currentReplyingTo) setReplyingTo(currentReplyingTo);
     } finally {
       setSending(false);
     }
@@ -1001,7 +1051,6 @@ export function Chats() {
   };
 
   const formatLastMessageSnippet = (chat: Chat) => chat.lastMessage || '';
-  const selectedSession = sessions.find(session => session.id === selectedSessionId) || null;
   const totalUnread = chats.reduce((sum, chat) => sum + (chat.unreadCount || 0), 0);
   const directChats = chats.filter(chat => !chat.isGroup).length;
   const groupChats = chats.filter(chat => chat.isGroup).length;
@@ -1107,9 +1156,9 @@ export function Chats() {
                     <div className="chats-rail-card-title">{selectedSession?.name || 'Session'}</div>
                     <div className="chats-rail-card-subtitle">{selectedSession?.phone || t('chats.noPhone')}</div>
                   </div>
-                  <span className={`chats-session-badge ${isConnected ? 'online' : 'syncing'}`}>
+                  <span className={`chats-session-badge ${isSessionReady ? 'online' : 'syncing'}`}>
                     <Wifi size={12} />
-                    {isConnected ? 'Live' : 'Syncing'}
+                    {isSessionReady ? 'Live' : 'Syncing'}
                   </span>
                 </div>
                 <select
@@ -1180,8 +1229,8 @@ export function Chats() {
               <div className="chats-rail-label">Workspace health</div>
               <div className="chats-rail-stats">
                 <div className="chats-rail-stat">
-                  <span>Live</span>
-                  <strong>{isConnected ? 'Online' : 'Reconnecting'}</strong>
+                  <span>WhatsApp</span>
+                  <strong>{isSessionReady ? 'Online' : 'Reconnecting'}</strong>
                 </div>
                 <div className="chats-rail-stat">
                   <span>Unread</span>
@@ -1315,7 +1364,7 @@ export function Chats() {
                   <div className="room-header-actions">
                     <div className="room-header-pill">
                       <Wifi size={14} />
-                      {isConnected ? 'Connected' : 'Waiting for sync'}
+                      {isSessionReady ? 'Connected' : 'Waiting for WhatsApp'}
                     </div>
                     <div className="room-header-pill subtle">{activeChat.isGroup ? 'Group' : 'Direct'}</div>
                   </div>
@@ -1645,7 +1694,7 @@ export function Chats() {
                     <button
                       type="button"
                       onClick={triggerFileSelect}
-                      disabled={!canWrite || sending}
+                      disabled={!canWrite || !isSessionReady || sending}
                       className="btn-input-accessory"
                       title={t('chats.attachTitle')}
                     >
@@ -1655,7 +1704,7 @@ export function Chats() {
                     <button
                       type="button"
                       onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                      disabled={!canWrite || sending}
+                      disabled={!canWrite || !isSessionReady || sending}
                       className={`btn-input-accessory ${showEmojiPicker ? 'active' : ''}`}
                       title={t('chats.emojiTitle')}
                     >
@@ -1666,19 +1715,21 @@ export function Chats() {
                       type="text"
                       placeholder={
                         canWrite
-                          ? attachment
-                            ? t('chats.captionPlaceholder')
-                            : t('chats.messagePlaceholder')
+                          ? !isSessionReady
+                            ? 'Waiting for WhatsApp to reconnect...'
+                            : attachment
+                              ? t('chats.captionPlaceholder')
+                              : t('chats.messagePlaceholder')
                           : t('chats.noPermission')
                       }
                       value={messageInput}
                       onChange={e => setMessageInput(e.target.value)}
-                      disabled={!canWrite || sending}
+                      disabled={!canWrite || !isSessionReady || sending}
                       className="message-text-input"
                     />
                     <button
                       type="submit"
-                      disabled={!canWrite || (!messageInput.trim() && !attachment) || sending}
+                      disabled={!canWrite || !isSessionReady || (!messageInput.trim() && !attachment) || sending}
                       className="btn-send-message"
                       aria-label={t('chats.send')}
                     >
