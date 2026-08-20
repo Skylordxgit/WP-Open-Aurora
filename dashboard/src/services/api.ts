@@ -206,6 +206,35 @@ export interface ChatMessage {
     media?: { mimetype: string; filename?: string; data?: string };
     quotedMessage?: { id: string; body: string };
     reactions?: Record<string, string>;
+    location?: {
+      latitude: number;
+      longitude: number;
+      description?: string;
+      address?: string;
+      url?: string;
+    };
+  };
+}
+
+/** Message returned directly by the scanned WhatsApp session. */
+export interface LiveChatMessage {
+  id: string;
+  chatId: string;
+  from: string;
+  to: string;
+  body: string;
+  type: string;
+  timestamp: number;
+  fromMe: boolean;
+  isGroup: boolean;
+  media?: { mimetype: string; filename?: string; data?: string };
+  quotedMessage?: { id: string; body: string };
+  location?: {
+    latitude: number;
+    longitude: number;
+    description?: string;
+    address?: string;
+    url?: string;
   };
 }
 
@@ -420,10 +449,20 @@ export const sessionApi = {
       method: 'POST',
       body: JSON.stringify({ chatId }),
     }),
-  getChatMessages: (id: string, chatId: string, limit = 100) =>
+  getChatMessages: (id: string, chatId: string, limit = 100, offset = 0) =>
     request<{ messages: ChatMessage[]; total: number }>(
-      `/sessions/${id}/messages?chatId=${encodeURIComponent(chatId)}&limit=${limit}`,
+      `/sessions/${id}/messages?chatId=${encodeURIComponent(chatId)}&limit=${limit}&offset=${offset}`,
     ),
+  getLiveChatHistory: (id: string, chatId: string, limit = 100, includeMedia = false) => {
+    const query = new URLSearchParams({
+      limit: String(limit),
+      includeMedia: String(includeMedia),
+    });
+    return request<LiveChatMessage[]>(
+      `/sessions/${id}/messages/${encodeURIComponent(chatId)}/history?${query.toString()}`,
+      { timeoutMs: includeMedia ? 120000 : 30000 },
+    );
+  },
 };
 
 // =============================================================================

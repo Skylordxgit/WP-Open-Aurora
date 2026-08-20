@@ -538,9 +538,9 @@ describe('MessageService', () => {
       expect(mockEngine.getChatHistory).toHaveBeenCalledWith('test@c.us', 5, true);
     });
 
-    it('should clamp the limit to [1, 100] and default non-finite values to 50', async () => {
-      await service.getChatHistory('sess-1', 'test@c.us', 500);
-      expect(mockEngine.getChatHistory).toHaveBeenLastCalledWith('test@c.us', 100, false);
+    it('should clamp the limit to [1, 500] and default non-finite values to 50', async () => {
+      await service.getChatHistory('sess-1', 'test@c.us', 999);
+      expect(mockEngine.getChatHistory).toHaveBeenLastCalledWith('test@c.us', 500, false);
 
       await service.getChatHistory('sess-1', 'test@c.us', 0);
       expect(mockEngine.getChatHistory).toHaveBeenLastCalledWith('test@c.us', 1, false);

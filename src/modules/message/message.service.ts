@@ -524,14 +524,14 @@ export class MessageService {
   }
 
   /** Maximum messages a single getChatHistory call may request from the engine. */
-  private static readonly MAX_CHAT_HISTORY_LIMIT = 100;
+  private static readonly MAX_CHAT_HISTORY_LIMIT = 500;
 
   /**
    * Fetch chat history live from WhatsApp (bypasses local DB).
    * Returns the most recent `limit` messages for the given chat.
    * When `includeMedia` is true, downloads media (base64) for messages that have it.
    *
-   * `limit` is clamped to [1, 100] (and falls back to 50 for non-finite input) so a
+   * `limit` is clamped to [1, 500] (and falls back to 50 for non-finite input) so a
    * caller cannot ask the engine to fetch an unbounded number of messages.
    */
   async getChatHistory(sessionId: string, chatId: string, limit = 50, includeMedia = false) {

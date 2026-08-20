@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { Fragment, useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import {
   Search,
@@ -19,6 +19,13 @@ import {
   Phone,
   Wifi,
   Clock3,
+  Download,
+  FileText,
+  Image as ImageIcon,
+  MapPin,
+  RefreshCw,
+  Video,
+  Mic,
 } from 'lucide-react';
 import {
   sessionApi,
@@ -27,6 +34,7 @@ import {
   type Session,
   type Chat,
   type ChatMessage,
+  type LiveChatMessage,
   type MessageType,
 } from '../services/api';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -42,8 +50,19 @@ interface ChatMessageView extends ChatMessage {
     media?: MessageMedia;
     quotedMessage?: { id: string; body: string };
     reactions?: Record<string, string>;
+    location?: {
+      latitude: number;
+      longitude: number;
+      description?: string;
+      address?: string;
+      url?: string;
+    };
   };
 }
+
+const INITIAL_HISTORY_LIMIT = 100;
+const HISTORY_PAGE_SIZE = 100;
+const MAX_HISTORY_LIMIT = 500;
 
 // Delivery acks must only ADVANCE the tick, never regress it. The backend DB update is forward-only
 // (ackStatusTransitionFrom), but the live websocket ack fires on every receipt (incl. pending/sent)
@@ -106,6 +125,75 @@ const getChatDisplayName = (chat: Pick<Chat, 'id' | 'name'>): string => {
   return getChatNumber(chat.id);
 };
 
+const messageIdentity = (message: ChatMessageView): string => message.waMessageId || message.id;
+
+const messageTimestamp = (message: ChatMessageView): number => {
+  if (typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)) {
+    return message.timestamp;
+  }
+  const createdAt = new Date(message.createdAt).getTime();
+  return Number.isFinite(createdAt) ? Math.floor(createdAt / 1000) : 0;
+};
+
+const normalizeLiveMessage = (message: LiveChatMessage): ChatMessageView => {
+  const metadata: ChatMessageView['metadata'] = {};
+  if (message.media) metadata.media = message.media;
+  if (message.quotedMessage) metadata.quotedMessage = message.quotedMessage;
+  if (message.location) metadata.location = message.location;
+
+  return {
+    id: message.id,
+    waMessageId: message.id,
+    chatId: message.chatId,
+    from: message.from,
+    to: message.to,
+    body: message.body || '',
+    type: asMessageType(message.type),
+    direction: message.fromMe ? 'outgoing' : 'incoming',
+    status: 'sent',
+    timestamp: message.timestamp,
+    createdAt: new Date(message.timestamp * 1000).toISOString(),
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+  };
+};
+
+const mergeMessageHistory = (...collections: ChatMessageView[][]): ChatMessageView[] => {
+  const merged = new Map<string, ChatMessageView>();
+
+  for (const collection of collections) {
+    for (const message of collection) {
+      const key = messageIdentity(message);
+      const existing = merged.get(key);
+      if (!existing) {
+        merged.set(key, message);
+        continue;
+      }
+
+      const existingMedia = existing.metadata?.media;
+      const incomingMedia = message.metadata?.media;
+      const media = incomingMedia?.data
+        ? incomingMedia
+        : existingMedia?.data
+          ? existingMedia
+          : incomingMedia || existingMedia;
+      const metadata = {
+        ...existing.metadata,
+        ...message.metadata,
+        ...(media ? { media } : {}),
+      };
+
+      merged.set(key, {
+        ...existing,
+        ...message,
+        status: mergeDeliveryStatus(existing.status, message.status) || message.status,
+        metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+      });
+    }
+  }
+
+  return [...merged.values()].sort((a, b) => messageTimestamp(a) - messageTimestamp(b));
+};
+
 export function Chats() {
   const { t } = useTranslation();
   useDocumentTitle(t('nav.chats'));
@@ -128,6 +216,11 @@ export function Chats() {
   const [activeChat, setActiveChat] = useState<Chat | null>(null);
   const [messages, setMessages] = useState<ChatMessageView[]>([]);
   const [loadingMessages, setLoadingMessages] = useState<boolean>(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState<boolean>(false);
+  const [loadingMedia, setLoadingMedia] = useState<boolean>(false);
+  const [historyLimit, setHistoryLimit] = useState<number>(INITIAL_HISTORY_LIMIT);
+  const [canLoadOlder, setCanLoadOlder] = useState<boolean>(false);
+  const [historySource, setHistorySource] = useState<'live' | 'stored'>('live');
   const [messageInput, setMessageInput] = useState<string>('');
   const [sending, setSending] = useState<boolean>(false);
 
@@ -143,11 +236,34 @@ export function Chats() {
 
   // References
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
+  const roomMessagesRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const messageRequestRef = useRef(0);
+  const shouldScrollToBottomRef = useRef(false);
+  const preservedScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const [replyingTo, setReplyingTo] = useState<ChatMessageView | null>(null);
 
   // Popular emojis
-  const popularEmojis = ['😀', '😂', '👍', '❤️', '🔥', '👏', '🙏', '🎉', '💡', '🤔', '😅', '😍', '😊', '😭', '😎', '😜', '🚀', '✨'];
+  const popularEmojis = [
+    '😀',
+    '😂',
+    '👍',
+    '❤️',
+    '🔥',
+    '👏',
+    '🙏',
+    '🎉',
+    '💡',
+    '🤔',
+    '😅',
+    '😍',
+    '😊',
+    '😭',
+    '😎',
+    '😜',
+    '🚀',
+    '✨',
+  ];
 
   // 1. Fetch available connected sessions on mount
   useEffect(() => {
@@ -207,6 +323,12 @@ export function Chats() {
     [selectedSessionId, t, showWarningToast],
   );
 
+  const isRoomNearBottom = useCallback(() => {
+    const room = roomMessagesRef.current;
+    if (!room) return true;
+    return room.scrollHeight - room.scrollTop - room.clientHeight < 120;
+  }, []);
+
   // 3. WebSocket integration for real-time messages
   const handleIncomingMessage = useCallback(
     (event: { sessionId: string; message: Record<string, unknown> }) => {
@@ -217,6 +339,7 @@ export function Chats() {
       // Update message list if the message belongs to the currently active chat
       if (activeChat && newMsg.chatId === activeChat.id) {
         markChatRead(activeChat.id);
+        shouldScrollToBottomRef.current = isRoomNearBottom();
 
         const mappedMessage: ChatMessageView = {
           id: newMsg.id,
@@ -266,7 +389,7 @@ export function Chats() {
         return updatedChats;
       });
     },
-    [selectedSessionId, activeChat, loadChats, markChatRead],
+    [selectedSessionId, activeChat, loadChats, markChatRead, isRoomNearBottom],
   );
 
   const handleIncomingMessageAck = useCallback(
@@ -343,24 +466,86 @@ export function Chats() {
     }
   }, [selectedSessionId, isConnected, subscribe, unsubscribe]);
 
-  // 4. Fetch message history for the selected chat
+  // 4. Merge live WhatsApp history with locally stored delivery state. Text arrives first so the
+  // conversation is usable immediately; media is hydrated in a second request in the background.
   const loadMessages = useCallback(
-    async (chatId: string) => {
+    async (chatId: string, limit = INITIAL_HISTORY_LIMIT, loadingOlder = false) => {
       if (!selectedSessionId || !chatId) return;
+      const requestId = ++messageRequestRef.current;
+      setLoadingMedia(false);
       try {
-        setLoadingMessages(true);
-        markChatRead(chatId);
-        const data = await sessionApi.getChatMessages(selectedSessionId, chatId, 100);
-        setMessages([...data.messages].reverse());
+        if (loadingOlder) {
+          setLoadingOlderMessages(true);
+        } else {
+          setLoadingMessages(true);
+          setLoadingMedia(false);
+          setCanLoadOlder(false);
+          setHistoryLimit(limit);
+          shouldScrollToBottomRef.current = true;
+          markChatRead(chatId);
+        }
+
+        const [storedResult, liveResult] = await Promise.allSettled([
+          sessionApi.getChatMessages(selectedSessionId, chatId, INITIAL_HISTORY_LIMIT),
+          sessionApi.getLiveChatHistory(selectedSessionId, chatId, limit, false),
+        ]);
+
+        if (requestId !== messageRequestRef.current) return;
+        if (storedResult.status === 'rejected' && liveResult.status === 'rejected') {
+          throw liveResult.reason;
+        }
+
+        const storedMessages =
+          storedResult.status === 'fulfilled' ? ([...storedResult.value.messages].reverse() as ChatMessageView[]) : [];
+        const liveMessages = liveResult.status === 'fulfilled' ? liveResult.value.map(normalizeLiveMessage) : [];
+        const loadedMessages = mergeMessageHistory(liveMessages, storedMessages);
+
+        setMessages(previous => (loadingOlder ? mergeMessageHistory(previous, loadedMessages) : loadedMessages));
+        setHistoryLimit(limit);
+        setHistorySource(liveResult.status === 'fulfilled' ? 'live' : 'stored');
+        setCanLoadOlder(
+          liveResult.status === 'fulfilled' && liveResult.value.length >= limit && limit < MAX_HISTORY_LIMIT,
+        );
+
+        if (liveResult.status === 'fulfilled') {
+          setLoadingMedia(true);
+          void sessionApi
+            .getLiveChatHistory(selectedSessionId, chatId, limit, true)
+            .then(mediaHistory => {
+              if (requestId !== messageRequestRef.current) return;
+              setMessages(previous => mergeMessageHistory(previous, mediaHistory.map(normalizeLiveMessage)));
+            })
+            .catch(() => {
+              // Expired or unavailable WhatsApp media is represented by a clear placeholder below.
+            })
+            .finally(() => {
+              if (requestId === messageRequestRef.current) setLoadingMedia(false);
+            });
+        }
       } catch (err) {
+        if (requestId !== messageRequestRef.current) return;
+        if (loadingOlder) preservedScrollRef.current = null;
         showErrorToast(t('chats.errors.loadMessages'), err instanceof Error ? err.message : undefined);
-        setMessages([]);
+        if (!loadingOlder) setMessages([]);
       } finally {
-        setLoadingMessages(false);
+        if (requestId === messageRequestRef.current) {
+          setLoadingMessages(false);
+          setLoadingOlderMessages(false);
+        }
       }
     },
     [selectedSessionId, markChatRead, t, showErrorToast],
   );
+
+  const handleLoadOlderMessages = () => {
+    if (!activeChat || loadingOlderMessages) return;
+    const room = roomMessagesRef.current;
+    if (room) {
+      preservedScrollRef.current = { scrollHeight: room.scrollHeight, scrollTop: room.scrollTop };
+    }
+    const nextLimit = Math.min(historyLimit + HISTORY_PAGE_SIZE, MAX_HISTORY_LIMIT);
+    void loadMessages(activeChat.id, nextLimit, true);
+  };
 
   const handleReactMessage = async (msg: ChatMessageView, emoji: string) => {
     if (!selectedSessionId || !activeChat) return;
@@ -434,16 +619,38 @@ export function Chats() {
 
   useEffect(() => {
     if (activeChat) {
-      void loadMessages(activeChat.id);
+      setHistoryLimit(INITIAL_HISTORY_LIMIT);
+      setCanLoadOlder(false);
+      setHistorySource('live');
+      preservedScrollRef.current = null;
+      void loadMessages(activeChat.id, INITIAL_HISTORY_LIMIT);
       setChats(prev => prev.map(c => (c.id === activeChat.id ? { ...c, unreadCount: 0 } : c)));
     } else {
+      messageRequestRef.current += 1;
       setMessages([]);
+      setLoadingMessages(false);
+      setLoadingOlderMessages(false);
+      setLoadingMedia(false);
     }
   }, [activeChat, loadMessages]);
 
-  // 5. Scroll chat to bottom
-  useEffect(() => {
-    chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // 5. Keep the viewport stable while prepending history, and only follow new messages when the
+  // operator was already near the bottom (or just sent a message).
+  useLayoutEffect(() => {
+    const room = roomMessagesRef.current;
+    if (!room) return;
+
+    const preserved = preservedScrollRef.current;
+    if (preserved) {
+      room.scrollTop = room.scrollHeight - preserved.scrollHeight + preserved.scrollTop;
+      preservedScrollRef.current = null;
+      return;
+    }
+
+    if (shouldScrollToBottomRef.current) {
+      chatBottomRef.current?.scrollIntoView({ block: 'end' });
+      shouldScrollToBottomRef.current = false;
+    }
   }, [messages]);
 
   // 6. Handle file selection & base64 conversion
@@ -527,6 +734,7 @@ export function Chats() {
           : undefined,
     };
 
+    shouldScrollToBottomRef.current = true;
     setMessages(prev => [...prev, tempMessage]);
 
     const currentAttachment = attachment;
@@ -580,9 +788,7 @@ export function Chats() {
         if (chatIndex === -1) return prevChats;
         const updatedChats = [...prevChats];
         const target = { ...updatedChats[chatIndex] };
-        target.lastMessage = currentAttachment
-          ? `[${currentAttachment.mimetype.split('/')[0]}]`
-          : textToSend;
+        target.lastMessage = currentAttachment ? `[${currentAttachment.mimetype.split('/')[0]}]` : textToSend;
         target.timestamp = Math.floor(Date.now() / 1000);
         updatedChats.splice(chatIndex, 1);
         updatedChats.unshift(target);
@@ -600,6 +806,23 @@ export function Chats() {
   const formatTime = (timestamp?: number) => {
     if (!timestamp) return '';
     return new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const formatMessageDate = (timestamp: number) => {
+    const date = new Date(timestamp * 1000);
+    const today = new Date();
+    if (date.toDateString() === today.toDateString()) return 'Today';
+
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (date.toDateString() === yesterday.toDateString()) return t('chats.yesterday');
+
+    return date.toLocaleDateString([], {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: date.getFullYear() === today.getFullYear() ? undefined : 'numeric',
+    });
   };
 
   const formatLastMessageSnippet = (chat: Chat) => chat.lastMessage || '';
@@ -682,8 +905,7 @@ export function Chats() {
           <h3>{t('chats.noSessionsTitle')}</h3>
           <p>
             <Trans i18nKey="chats.noSessionsDesc">
-              Please connect a WhatsApp session from the <strong>Sessions</strong> menu first to use the chat
-              feature.
+              Please connect a WhatsApp session from the <strong>Sessions</strong> menu first to use the chat feature.
             </Trans>
           </p>
         </div>
@@ -790,7 +1012,9 @@ export function Chats() {
                 </div>
                 <div className="chats-rail-stat">
                   <span>Mix</span>
-                  <strong>{directChats}/{groupChats}</strong>
+                  <strong>
+                    {directChats}/{groupChats}
+                  </strong>
                 </div>
               </div>
             </div>
@@ -858,18 +1082,14 @@ export function Chats() {
                       className={`chat-item-card ${isActive ? 'active' : ''}`}
                       onClick={() => setActiveChat(chat)}
                     >
-                      <div className="chat-avatar">
-                        {chat.isGroup ? <Users size={20} /> : <User size={20} />}
-                      </div>
+                      <div className="chat-avatar">{chat.isGroup ? <Users size={20} /> : <User size={20} />}</div>
 
                       <div className="chat-item-info">
                         <div className="chat-item-top">
                           <span className="chat-item-name" title={getChatDisplayName(chat)}>
                             {getChatDisplayName(chat)}
                           </span>
-                          {chat.timestamp && (
-                            <span className="chat-item-time">{formatChatTime(chat.timestamp)}</span>
-                          )}
+                          {chat.timestamp && <span className="chat-item-time">{formatChatTime(chat.timestamp)}</span>}
                         </div>
                         <div className="chat-item-bottom">
                           <span className="chat-item-snippet" title={formatLastMessageSnippet(chat)}>
@@ -881,9 +1101,7 @@ export function Chats() {
                             <span className={`chat-type-badge ${chat.isGroup ? 'group' : 'direct'}`}>
                               {chat.isGroup ? 'Group' : 'Direct'}
                             </span>
-                            {chat.unreadCount > 0 && (
-                              <span className="chat-unread-badge">{chat.unreadCount}</span>
-                            )}
+                            {chat.unreadCount > 0 && <span className="chat-unread-badge">{chat.unreadCount}</span>}
                           </div>
                         </div>
                       </div>
@@ -899,15 +1117,16 @@ export function Chats() {
               <div className="room-container">
                 <header className="room-header">
                   <div className="room-header-main">
-                    <div className="room-avatar">
-                      {activeChat.isGroup ? <Users size={20} /> : <User size={20} />}
-                    </div>
+                    <div className="room-avatar">{activeChat.isGroup ? <Users size={20} /> : <User size={20} />}</div>
                     <div className="room-contact-info">
                       <h3>{getChatDisplayName(activeChat)}</h3>
-                      {activeChat.name?.trim() && !activeChat.name.includes('@') ? <span>{getChatNumber(activeChat.id)}</span> : null}
+                      {activeChat.name?.trim() && !activeChat.name.includes('@') ? (
+                        <span>{getChatNumber(activeChat.id)}</span>
+                      ) : null}
                       <div className="room-contact-meta">
                         <span>{activeChat.isGroup ? 'Shared workspace' : '1:1 conversation'}</span>
                         <span>{activeChatMessageCount} messages loaded</span>
+                        <span>{historySource === 'live' ? 'WhatsApp history' : 'Stored history only'}</span>
                         <span>{activeChatUnread} unread</span>
                       </div>
                     </div>
@@ -921,7 +1140,7 @@ export function Chats() {
                   </div>
                 </header>
 
-                <div className="room-messages">
+                <div className="room-messages" ref={roomMessagesRef}>
                   {loadingMessages ? (
                     <div className="messages-loading">
                       <Loader2 className="animate-spin" size={32} />
@@ -933,176 +1152,256 @@ export function Chats() {
                       <span>{t('chats.noMessagesInChat')}</span>
                     </div>
                   ) : (
-                    messages.map(msg => {
-                      const isMe = msg.direction === 'outgoing';
-                      const formattedTime = formatTime(
-                        msg.timestamp || Math.floor(new Date(msg.createdAt).getTime() / 1000),
-                      );
+                    <>
+                      <div className="chat-history-controls">
+                        {canLoadOlder && (
+                          <button
+                            type="button"
+                            className="load-older-messages"
+                            onClick={handleLoadOlderMessages}
+                            disabled={loadingOlderMessages}
+                          >
+                            {loadingOlderMessages ? (
+                              <Loader2 className="animate-spin" size={14} />
+                            ) : (
+                              <RefreshCw size={14} />
+                            )}
+                            {loadingOlderMessages ? 'Loading older messages...' : 'Load older messages'}
+                          </button>
+                        )}
+                        {loadingMedia && (
+                          <span className="media-loading-status">
+                            <Loader2 className="animate-spin" size={13} />
+                            Loading media
+                          </span>
+                        )}
+                      </div>
+                      {messages.map((msg, messageIndex) => {
+                        const isMe = msg.direction === 'outgoing';
+                        const currentTimestamp = messageTimestamp(msg);
+                        const formattedTime = formatTime(currentTimestamp);
+                        const previousMessage = messageIndex > 0 ? messages[messageIndex - 1] : null;
+                        const showDateSeparator =
+                          !previousMessage ||
+                          new Date(messageTimestamp(previousMessage) * 1000).toDateString() !==
+                            new Date(currentTimestamp * 1000).toDateString();
 
-                      const isMediaMessage = msg.type !== 'text';
-                      const mediaInfo = msg.metadata?.media;
+                        const isMediaMessage = msg.type !== 'text';
+                        const mediaInfo = msg.metadata?.media;
 
-                      const renderMedia = () => {
-                        if (msg.type === 'revoked') return null;
-                        if (!mediaInfo) return null;
-                        const mediaSrc = getMediaSrc(mediaInfo);
-                        if (!mediaSrc) return null;
+                        const renderMedia = () => {
+                          if (msg.type === 'revoked') return null;
 
-                        switch (msg.type) {
-                          case 'image':
-                          case 'sticker':
+                          if (msg.type === 'location' && msg.metadata?.location) {
+                            const location = msg.metadata.location;
+                            const mapUrl =
+                              location.url ||
+                              `https://www.google.com/maps/search/?api=1&query=${location.latitude},${location.longitude}`;
                             return (
-                              <div className="message-media-image">
-                                <img
-                                  src={mediaSrc}
-                                  alt={mediaInfo.filename || 'WhatsApp Image'}
-                                  className="chat-image-media"
-                                />
-                              </div>
+                              <a className="chat-location-media" href={mapUrl} target="_blank" rel="noreferrer">
+                                <MapPin size={20} />
+                                <span>
+                                  <strong>{location.description || 'Shared location'}</strong>
+                                  <small>{location.address || `${location.latitude}, ${location.longitude}`}</small>
+                                </span>
+                              </a>
                             );
-                          case 'video':
-                            return (
-                              <div className="message-media-video">
-                                <video src={mediaSrc} controls className="chat-video-media" />
-                              </div>
-                            );
-                          case 'audio':
-                          case 'voice':
-                            return (
-                              <div className="message-media-audio">
-                                <audio src={mediaSrc} controls className="chat-audio-media" />
-                              </div>
-                            );
-                          case 'document':
-                          default:
-                            return (
-                              <div className="message-media-document">
-                                <a
-                                  href={mediaSrc}
-                                  download={mediaInfo.filename || 'document'}
-                                  className="chat-document-media"
-                                >
-                                  📎 {mediaInfo.filename || t('chats.downloadDocument')}
-                                </a>
-                              </div>
-                            );
-                        }
-                      };
+                          }
 
-                      const reactions = msg.metadata?.reactions || {};
-                      const hasReactions = Object.keys(reactions).length > 0;
-                      const isRevoked = msg.type === 'revoked';
+                          const attachmentTypes: MessageType[] = [
+                            'image',
+                            'sticker',
+                            'video',
+                            'audio',
+                            'voice',
+                            'document',
+                          ];
+                          if (!attachmentTypes.includes(msg.type)) return null;
 
-                      return (
-                        <div
-                          key={msg.id}
-                          className={`message-bubble-wrapper ${isMe ? 'outgoing' : 'incoming'}`}
-                        >
-                          <div className="message-bubble-container">
-                            <div
-                              className={`message-bubble ${isMe ? 'outgoing' : 'incoming'} ${msg.status} ${
-                                isMediaMessage ? 'media-type' : ''
-                              } ${isRevoked ? 'revoked-type' : ''}`}
-                            >
-                              {/* Quoted message display */}
-                              {msg.metadata?.quotedMessage && (
-                                <div className="message-quote-box">
-                                  <div className="quote-body">{msg.metadata.quotedMessage.body}</div>
-                                </div>
-                              )}
-
-                              {renderMedia()}
-
-                              {isRevoked ? (
-                                <div className="message-text">{t('chats.messageDeleted')}</div>
+                          const mediaSrc = getMediaSrc(mediaInfo);
+                          if (!mediaInfo || !mediaSrc) {
+                            const mediaIcon =
+                              msg.type === 'image' || msg.type === 'sticker' ? (
+                                <ImageIcon size={18} />
+                              ) : msg.type === 'video' ? (
+                                <Video size={18} />
+                              ) : msg.type === 'audio' || msg.type === 'voice' ? (
+                                <Mic size={18} />
                               ) : (
-                                msg.body &&
-                                (!mediaInfo || msg.body !== mediaInfo.filename) && (
-                                  <div className="message-text">{msg.body}</div>
-                                )
-                              )}
-
-                              <div className="message-meta">
-                                <span className="message-time">{formattedTime}</span>
-                                {isMe && (
-                                  <span className={`message-status-icon ${msg.status}`}>
-                                    {msg.status === 'pending' && '🕒'}
-                                    {msg.status === 'sent' && '✓'}
-                                    {msg.status === 'delivered' && '✓✓'}
-                                    {msg.status === 'read' && '✓✓'}
-                                    {msg.status === 'failed' && '⚠️'}
-                                  </span>
-                                )}
+                                <FileText size={18} />
+                              );
+                            return (
+                              <div className="message-media-unavailable">
+                                {mediaIcon}
+                                <span>{loadingMedia ? 'Loading media...' : 'Media unavailable'}</span>
                               </div>
+                            );
+                          }
 
-                              {/* Reactions display */}
-                              {hasReactions && (
-                                <div className="message-reactions-badge">
-                                  {Object.values(reactions)
-                                    .slice(0, 3)
-                                    .map((emoji, idx) => (
-                                      <span key={idx} className="reaction-emoji-span">
-                                        {emoji}
-                                      </span>
-                                    ))}
-                                  {Object.keys(reactions).length > 1 && (
-                                    <span className="reactions-count-span">
-                                      {Object.keys(reactions).length}
-                                    </span>
-                                  )}
+                          switch (msg.type) {
+                            case 'image':
+                            case 'sticker':
+                              return (
+                                <div className="message-media-image">
+                                  <a href={mediaSrc} target="_blank" rel="noreferrer">
+                                    <img
+                                      src={mediaSrc}
+                                      alt={mediaInfo.filename || 'WhatsApp image'}
+                                      className={`chat-image-media ${msg.type === 'sticker' ? 'sticker' : ''}`}
+                                      loading="lazy"
+                                    />
+                                  </a>
                                 </div>
-                              )}
-                            </div>
-
-                            {/* Message actions menu (hover) */}
-                            {!isRevoked && (
-                              <div className="message-actions-menu">
-                                <button
-                                  type="button"
-                                  className="action-btn"
-                                  onClick={() => setReplyingTo(msg)}
-                                  title={t('chats.actions.reply')}
-                                >
-                                  <CornerUpLeft size={14} />
-                                </button>
-
-                                <div className="reaction-trigger-wrapper">
-                                  <button
-                                    type="button"
-                                    className="action-btn reaction-btn"
-                                    title={t('chats.actions.react')}
-                                  >
-                                    <Smile size={14} />
-                                  </button>
-                                  <div className="reaction-quick-popover">
-                                    {['👍', '❤️', '😂', '😮', '😢', '🙏'].map(emoji => (
-                                      <button
-                                        key={emoji}
-                                        type="button"
-                                        onClick={() => handleReactMessage(msg, emoji)}
-                                      >
-                                        {emoji}
-                                      </button>
-                                    ))}
-                                  </div>
+                              );
+                            case 'video':
+                              return (
+                                <div className="message-media-video">
+                                  <video src={mediaSrc} controls preload="metadata" className="chat-video-media" />
                                 </div>
-
-                                {isMe && msg.status !== 'pending' && (
-                                  <button
-                                    type="button"
-                                    className="action-btn delete-btn"
-                                    onClick={() => handleDeleteMessage(msg)}
-                                    title={t('chats.actions.delete')}
+                              );
+                            case 'audio':
+                            case 'voice':
+                              return (
+                                <div className="message-media-audio">
+                                  <audio src={mediaSrc} controls preload="metadata" className="chat-audio-media" />
+                                </div>
+                              );
+                            case 'document':
+                              return (
+                                <div className="message-media-document">
+                                  <a
+                                    href={mediaSrc}
+                                    download={mediaInfo.filename || 'document'}
+                                    className="chat-document-media"
                                   >
-                                    <Trash2 size={14} />
-                                  </button>
-                                )}
+                                    <FileText size={18} />
+                                    <span>{mediaInfo.filename || t('chats.downloadDocument')}</span>
+                                    <Download size={15} />
+                                  </a>
+                                </div>
+                              );
+                            default:
+                              return null;
+                          }
+                        };
+
+                        const reactions = msg.metadata?.reactions || {};
+                        const hasReactions = Object.keys(reactions).length > 0;
+                        const isRevoked = msg.type === 'revoked';
+
+                        return (
+                          <Fragment key={messageIdentity(msg)}>
+                            {showDateSeparator && (
+                              <div className="message-date-separator">
+                                <span>{formatMessageDate(currentTimestamp)}</span>
                               </div>
                             )}
-                          </div>
-                        </div>
-                      );
-                    })
+                            <div className={`message-bubble-wrapper ${isMe ? 'outgoing' : 'incoming'}`}>
+                              <div className="message-bubble-container">
+                                <div
+                                  className={`message-bubble ${isMe ? 'outgoing' : 'incoming'} ${msg.status} ${
+                                    isMediaMessage ? 'media-type' : ''
+                                  } ${isRevoked ? 'revoked-type' : ''}`}
+                                >
+                                  {/* Quoted message display */}
+                                  {msg.metadata?.quotedMessage && (
+                                    <div className="message-quote-box">
+                                      <div className="quote-body">{msg.metadata.quotedMessage.body}</div>
+                                    </div>
+                                  )}
+
+                                  {renderMedia()}
+
+                                  {isRevoked ? (
+                                    <div className="message-text">{t('chats.messageDeleted')}</div>
+                                  ) : (
+                                    msg.body &&
+                                    (!mediaInfo || msg.body !== mediaInfo.filename) && (
+                                      <div className="message-text">{msg.body}</div>
+                                    )
+                                  )}
+
+                                  <div className="message-meta">
+                                    <span className="message-time">{formattedTime}</span>
+                                    {isMe && (
+                                      <span className={`message-status-icon ${msg.status}`}>
+                                        {msg.status === 'pending' && '🕒'}
+                                        {msg.status === 'sent' && '✓'}
+                                        {msg.status === 'delivered' && '✓✓'}
+                                        {msg.status === 'read' && '✓✓'}
+                                        {msg.status === 'failed' && '⚠️'}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {/* Reactions display */}
+                                  {hasReactions && (
+                                    <div className="message-reactions-badge">
+                                      {Object.values(reactions)
+                                        .slice(0, 3)
+                                        .map((emoji, idx) => (
+                                          <span key={idx} className="reaction-emoji-span">
+                                            {emoji}
+                                          </span>
+                                        ))}
+                                      {Object.keys(reactions).length > 1 && (
+                                        <span className="reactions-count-span">{Object.keys(reactions).length}</span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Message actions menu (hover) */}
+                                {!isRevoked && (
+                                  <div className="message-actions-menu">
+                                    <button
+                                      type="button"
+                                      className="action-btn"
+                                      onClick={() => setReplyingTo(msg)}
+                                      title={t('chats.actions.reply')}
+                                    >
+                                      <CornerUpLeft size={14} />
+                                    </button>
+
+                                    <div className="reaction-trigger-wrapper">
+                                      <button
+                                        type="button"
+                                        className="action-btn reaction-btn"
+                                        title={t('chats.actions.react')}
+                                      >
+                                        <Smile size={14} />
+                                      </button>
+                                      <div className="reaction-quick-popover">
+                                        {['👍', '❤️', '😂', '😮', '😢', '🙏'].map(emoji => (
+                                          <button
+                                            key={emoji}
+                                            type="button"
+                                            onClick={() => handleReactMessage(msg, emoji)}
+                                          >
+                                            {emoji}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </div>
+
+                                    {isMe && msg.status !== 'pending' && (
+                                      <button
+                                        type="button"
+                                        className="action-btn delete-btn"
+                                        onClick={() => handleDeleteMessage(msg)}
+                                        title={t('chats.actions.delete')}
+                                      >
+                                        <Trash2 size={14} />
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </Fragment>
+                        );
+                      })}
+                    </>
                   )}
                   <div ref={chatBottomRef} />
                 </div>
@@ -1130,12 +1429,7 @@ export function Chats() {
                   <div className="chats-emoji-picker">
                     <div className="emoji-grid">
                       {popularEmojis.map(emoji => (
-                        <button
-                          key={emoji}
-                          type="button"
-                          className="emoji-btn"
-                          onClick={() => handleEmojiClick(emoji)}
-                        >
+                        <button key={emoji} type="button" className="emoji-btn" onClick={() => handleEmojiClick(emoji)}>
                           {emoji}
                         </button>
                       ))}
@@ -1149,10 +1443,7 @@ export function Chats() {
                     <div className="replying-preview-content">
                       <div className="replying-to-title">
                         {t('chats.replyingTo', {
-                          name:
-                            replyingTo.direction === 'outgoing'
-                              ? t('chats.you')
-                              : getChatDisplayName(activeChat),
+                          name: replyingTo.direction === 'outgoing' ? t('chats.you') : getChatDisplayName(activeChat),
                         })}
                       </div>
                       <div className="replying-to-body">
@@ -1221,7 +1512,9 @@ export function Chats() {
                   <MessageSquare size={80} className="placeholder-icon" />
                 </div>
                 <h2>Select a conversation</h2>
-                <p>Pick a thread from the inbox to start replying, reviewing context, and handling WhatsApp chats faster.</p>
+                <p>
+                  Pick a thread from the inbox to start replying, reviewing context, and handling WhatsApp chats faster.
+                </p>
                 <div className="chats-placeholder-grid">
                   <div className="chats-placeholder-card">
                     <strong>Pick a conversation</strong>
