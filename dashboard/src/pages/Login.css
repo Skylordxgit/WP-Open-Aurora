@@ -26,6 +26,7 @@
   width: 100%;
   max-width: 420px;
   text-align: center;
+  color: var(--text-primary);
 }
 
 [data-theme='dark'] .login-card,
@@ -65,12 +66,12 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text-secondary);
-  background: rgba(19, 31, 48, 0.94);
+  background: var(--bg-white);
 }
 
 .login-language svg {
   flex-shrink: 0;
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .login-language select {
@@ -84,11 +85,12 @@
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
+  color-scheme: light dark;
 }
 
 .login-language select option {
   color: var(--text-primary);
-  background: #162233;
+  background: var(--bg-white);
 }
 
 .login-language:focus-within {
@@ -106,6 +108,16 @@
 .login-subtitle {
   color: var(--text-secondary);
   margin: 0 0 2rem;
+}
+
+[data-theme='dark'] .login-language,
+:root:not([data-theme='light']) .login-language {
+  background: rgba(19, 31, 48, 0.94);
+}
+
+[data-theme='dark'] .login-language select option,
+:root:not([data-theme='light']) .login-language select option {
+  background: #162233;
 }
 
 .login-form {
