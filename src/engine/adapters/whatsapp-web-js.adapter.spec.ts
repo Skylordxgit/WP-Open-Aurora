@@ -5,11 +5,13 @@ import {
   READY_RECONCILE_BRIDGE_RELOAD_GRACE_MS,
   READY_RECONCILE_TIMEOUT_MS,
   extractLinkedParentJID,
+  isNoLidForUserError,
   loadRemoteMedia,
   resolveWebVersionPin,
   wwebjsAckToDeliveryStatus,
 } from './whatsapp-web-js.adapter';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
+import { RecipientUnreachableError } from '../../common/errors/recipient-unreachable.error';
 import { EngineStatus } from '../interfaces/whatsapp-engine.interface';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
 import { __resetWebVersionCache, WEB_VERSION_SETTLE_MS } from '../wa-web-version';
@@ -153,9 +155,76 @@ describe('WhatsAppWebJsAdapter.resolveContactPhone (@lid -> phone, #263)', () =>
     ).resolves.toBeNull();
   });
 
-  it('is best-effort: a thrown engine error resolves to null, not a rejection', async () => {
+  it('propagates a transient engine failure so callers do not cache it as a missing mapping', async () => {
     const adapter = readyAdapter(jest.fn().mockRejectedValue(new Error('Evaluation failed')));
-    await expect(adapter.resolveContactPhone('123@lid')).resolves.toBeNull();
+    await expect(adapter.resolveContactPhone('123@lid')).rejects.toThrow('Evaluation failed');
+  });
+
+  it('reuses a verified mapping when a later page lookup would fail', async () => {
+    const getContactLidAndPhone = jest
+      .fn()
+      .mockResolvedValueOnce([{ lid: '123@lid', pn: '628123456789@c.us' }])
+      .mockRejectedValueOnce(new Error('Evaluation failed'));
+    const adapter = readyAdapter(getContactLidAndPhone);
+
+    await expect(adapter.resolveContactPhone('123@lid')).resolves.toBe('628123456789');
+    await expect(adapter.resolveContactPhone('123@lid')).resolves.toBe('628123456789');
+    expect(getContactLidAndPhone).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WhatsAppWebJsAdapter LID send recovery', () => {
+  const readyAdapter = (client: unknown): WhatsAppWebJsAdapter => {
+    const adapter = new WhatsAppWebJsAdapter({ sessionId: 's', sessionDataPath: './data/sessions', puppeteer: {} });
+    (adapter as unknown as { status: EngineStatus }).status = EngineStatus.READY;
+    (adapter as unknown as { client: unknown }).client = client;
+    return adapter;
+  };
+  const sentMessage = { id: { _serialized: 'OUT1' }, timestamp: 1700000001 };
+
+  it('recognizes the unstructured whatsapp-web.js LID migration error', () => {
+    expect(isNoLidForUserError(new Error('Evaluation failed: No LID for user'))).toBe(true);
+    expect(isNoLidForUserError(new Error('network closed'))).toBe(false);
+  });
+
+  it('resolves a phone recipient to its current LID before sending', async () => {
+    const getNumberId = jest.fn().mockResolvedValue({ _serialized: '159442138038327@lid' });
+    const sendMessage = jest.fn().mockResolvedValue(sentMessage);
+    const adapter = readyAdapter({ getNumberId, sendMessage });
+
+    await expect(adapter.sendTextMessage('529934031058@c.us', 'hi')).resolves.toEqual({
+      id: 'OUT1',
+      timestamp: 1700000001,
+    });
+    expect(sendMessage).toHaveBeenCalledWith('159442138038327@lid', 'hi');
+  });
+
+  it('hydrates and retries an unresolved LID through its verified phone mapping', async () => {
+    const sendMessage = jest.fn().mockResolvedValueOnce(undefined).mockResolvedValueOnce(sentMessage);
+    const getContactLidAndPhone = jest
+      .fn()
+      .mockResolvedValue([{ lid: '159442138038327@lid', pn: '529934031058@c.us' }]);
+    const getNumberId = jest.fn().mockResolvedValue({ _serialized: '159442138038327@lid' });
+    const adapter = readyAdapter({ sendMessage, getContactLidAndPhone, getNumberId });
+
+    await expect(adapter.sendTextMessage('159442138038327@lid', 'hi')).resolves.toEqual({
+      id: 'OUT1',
+      timestamp: 1700000001,
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(getContactLidAndPhone).toHaveBeenCalledWith(['159442138038327@lid']);
+    expect(getNumberId).toHaveBeenCalledWith('529934031058');
+  });
+
+  it('returns a client-safe unreachable error only after verified recovery is unavailable', async () => {
+    const adapter = readyAdapter({
+      sendMessage: jest.fn().mockResolvedValue(undefined),
+      getContactLidAndPhone: jest.fn().mockResolvedValue([]),
+    });
+
+    await expect(adapter.sendTextMessage('159442138038327@lid', 'hi')).rejects.toBeInstanceOf(
+      RecipientUnreachableError,
+    );
   });
 });
 

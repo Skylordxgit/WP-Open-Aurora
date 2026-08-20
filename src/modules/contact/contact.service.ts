@@ -49,8 +49,14 @@ export class ContactService {
     return this.getEngine(sessionId).getNumberId(number);
   }
 
-  resolveContactPhone(sessionId: string, contactId: string) {
-    return this.getEngine(sessionId).resolveContactPhone(contactId);
+  async resolveContactPhone(sessionId: string, contactId: string): Promise<string | null> {
+    try {
+      return await this.getEngine(sessionId).resolveContactPhone(contactId);
+    } catch {
+      // The HTTP endpoint keeps its documented null-on-failure shape. Engine callers still receive
+      // transient lookup failures so they do not cache them as definitive missing mappings.
+      return null;
+    }
   }
 
   async resolveContacts(sessionId: string, contactIds: string[]) {

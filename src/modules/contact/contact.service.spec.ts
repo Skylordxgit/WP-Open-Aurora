@@ -42,6 +42,11 @@ describe('ContactService', () => {
     expect(resolveContactPhone).toHaveBeenCalledWith('123@lid');
   });
 
+  it('keeps the HTTP contract null-safe when the engine lookup fails transiently', async () => {
+    const resolveContactPhone = jest.fn().mockRejectedValue(new Error('Evaluation failed'));
+    await expect(makeService({ resolveContactPhone }).resolveContactPhone('s1', '123@lid')).resolves.toBeNull();
+  });
+
   it('resolves privacy IDs to a contact name and actual phone number', async () => {
     const svc = makeService({
       getStatus: jest.fn().mockReturnValue(EngineStatus.READY),

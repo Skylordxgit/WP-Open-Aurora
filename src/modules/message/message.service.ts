@@ -93,7 +93,7 @@ export class MessageService {
         );
       }
 
-      throw this.toClientFacingError(error, finalDto.chatId);
+      throw this.toClientFacingError(error);
     }
   }
 
@@ -150,7 +150,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error, dto.chatId);
+      throw this.toClientFacingError(error);
     }
   }
 
@@ -185,7 +185,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error, dto.chatId);
+      throw this.toClientFacingError(error);
     }
   }
 
@@ -219,7 +219,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error, dto.chatId);
+      throw this.toClientFacingError(error);
     }
   }
 
@@ -254,7 +254,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error, dto.chatId);
+      throw this.toClientFacingError(error);
     }
   }
 
@@ -326,7 +326,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error, dto.chatId);
+      throw this.toClientFacingError(error);
     }
   }
 
@@ -363,7 +363,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error, dto.chatId);
+      throw this.toClientFacingError(error);
     }
   }
 
@@ -397,7 +397,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error, dto.chatId);
+      throw this.toClientFacingError(error);
     }
   }
 
@@ -445,7 +445,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error, dto.chatId);
+      throw this.toClientFacingError(error);
     }
   }
 
@@ -480,7 +480,7 @@ export class MessageService {
     } catch (error) {
       message.status = MessageStatus.FAILED;
       await this.messageRepository.save(message);
-      throw this.toClientFacingError(error, dto.toChatId);
+      throw this.toClientFacingError(error);
     }
   }
 
@@ -666,17 +666,12 @@ export class MessageService {
    * caller-supplied internal/unsafe URL returns a client error instead of a 500.
    * All other errors pass through unchanged.
    */
-  private toClientFacingError(error: unknown, chatId?: string): unknown {
+  private toClientFacingError(error: unknown): unknown {
     if (error instanceof SsrfBlockedError) {
       return new BadRequestException(error.message);
     }
     if (error instanceof HttpException) {
       return error;
-    }
-    if (chatId?.endsWith('@lid')) {
-      return new BadRequestException(
-        'WhatsApp could not resolve this contact to a sendable phone number. Wait for synchronization and try again.',
-      );
     }
     return error;
   }

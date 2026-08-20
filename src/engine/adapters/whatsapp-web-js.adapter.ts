@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { Client, LocalAuth, MessageMedia, MessageTypes, WAState } from 'whatsapp-web.js';
+import { Client, LocalAuth, Message as WwebjsMessage, MessageMedia, MessageTypes, WAState } from 'whatsapp-web.js';
 import * as qrcode from 'qrcode';
 import * as path from 'path';
 import {
@@ -34,6 +34,7 @@ import {
 } from '../interfaces/whatsapp-engine.interface';
 import { createLogger } from '../../common/services/logger.service';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
+import { RecipientUnreachableError } from '../../common/errors/recipient-unreachable.error';
 import { assertSafeFetchUrl } from '../../common/security/ssrf-guard';
 import {
   GroupChat,
@@ -129,6 +130,17 @@ export function extractLinkedParentJID(groupMetadata?: GroupMetadataRaw): string
   return candidate._serialized ?? null;
 }
 
+/** whatsapp-web.js exposes this recipient-addressing failure only as message text. */
+export function isNoLidForUserError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('No LID for user');
+}
+
+class UnresolvedWwebjsRecipientError extends Error {
+  constructor(recipient: string) {
+    super(`whatsapp-web.js returned no chat/message for recipient ${recipient}`);
+  }
+}
+
 export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngine {
   private client: Client | null = null;
   private status: EngineStatus = EngineStatus.DISCONNECTED;
@@ -142,6 +154,8 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   private lastProbeStateConnected = false;
   private readyReconcileReloadAttempted = false;
   private tearingDown = false;
+  private readonly resolvedSendIds = new Map<string, string>();
+  private readonly lidToPhone = new Map<string, string>();
 
   constructor(private readonly config: WhatsAppWebJsConfig) {
     super();
@@ -240,7 +254,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     this.client.on('ready', () => {
       // The patched client flips this marker only after the page-to-Node event bridge attaches.
       // A premature READY would otherwise expose empty chats/contacts and lose inbound messages.
-      if (this.client?.eventsAttached === false) {
+      if ((this.client as Client & { eventsAttached?: boolean }).eventsAttached === false) {
         this.logger.warn('Ignoring premature ready because the WhatsApp message bridge is not attached', {
           sessionId: this.config.sessionId,
           action: 'premature_ready_ignored',
@@ -607,9 +621,125 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     return this.pushName;
   }
 
+  private normalizePhone(value: string): string {
+    return value.replace(/@(?:c\.us|s\.whatsapp\.net)$/i, '').replace(/\D/g, '');
+  }
+
+  private rememberLidPhone(lid: string | undefined, phone: string | undefined): void {
+    if (!lid?.endsWith('@lid') || !phone) return;
+    const digits = this.normalizePhone(phone);
+    const lidDigits = lid.split('@')[0].replace(/\D/g, '');
+    if (!digits || digits === lidDigits) return;
+    this.lidToPhone.set(lid, digits);
+    this.resolvedSendIds.set(`${digits}@c.us`, lid);
+  }
+
+  /** Resolve phone-addressed chats to WhatsApp's current send id and cache confirmed answers. */
+  private async resolveSendId(chatId: string): Promise<string> {
+    if (!chatId.endsWith('@c.us')) return chatId;
+
+    const cached = this.resolvedSendIds.get(chatId);
+    if (cached) return cached;
+
+    try {
+      const wid = await this.getNumberId(chatId);
+      if (wid) {
+        this.resolvedSendIds.set(chatId, wid);
+        this.rememberLidPhone(wid, chatId);
+        return wid;
+      }
+    } catch {
+      // A transient existence-probe failure must not block the first send attempt.
+    }
+    return chatId;
+  }
+
+  /**
+   * Hydrate a LID through a verified phone mapping. This is used only after a direct LID send has
+   * failed, so valid privacy ids stay on the fast path and no privacy-id digits are treated as a
+   * callable number.
+   */
+  private async recoverLidSendId(chatId: string): Promise<string | null> {
+    let phone = this.lidToPhone.get(chatId) ?? null;
+    if (!phone) {
+      try {
+        phone = await this.resolveContactPhone(chatId);
+      } catch {
+        return null;
+      }
+    }
+    if (!phone) return null;
+
+    try {
+      const canonical = await this.getNumberId(phone);
+      return canonical || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Resolve, send, and retry once when WhatsApp reports a stale recipient route. */
+  private async sendResolved<T>(chatId: string, send: (to: string) => Promise<T>): Promise<T> {
+    const to = await this.resolveSendId(chatId);
+    try {
+      return await send(to);
+    } catch (error) {
+      const unresolvedPhone =
+        chatId.endsWith('@c.us') && (isNoLidForUserError(error) || error instanceof UnresolvedWwebjsRecipientError);
+      if (unresolvedPhone) {
+        this.resolvedSendIds.delete(chatId);
+        const fresh = await this.resolveSendId(chatId);
+        if (fresh === to) throw new RecipientUnreachableError();
+        this.logger.warn('Retrying send after WhatsApp refreshed the recipient LID', {
+          chatId,
+          staleId: to,
+          freshId: fresh,
+        });
+        try {
+          return await send(fresh);
+        } catch (retryError) {
+          if (isNoLidForUserError(retryError) || retryError instanceof UnresolvedWwebjsRecipientError) {
+            throw new RecipientUnreachableError();
+          }
+          throw retryError;
+        }
+      }
+
+      const unresolvedLid =
+        chatId.endsWith('@lid') && (isNoLidForUserError(error) || error instanceof UnresolvedWwebjsRecipientError);
+      if (!unresolvedLid) throw error;
+
+      const fresh = await this.recoverLidSendId(chatId);
+      if (!fresh) throw new RecipientUnreachableError();
+      this.logger.warn('Retrying send after hydrating a LID through its verified phone mapping', {
+        chatId,
+        freshId: fresh,
+      });
+      try {
+        return await send(fresh);
+      } catch (retryError) {
+        if (isNoLidForUserError(retryError) || retryError instanceof UnresolvedWwebjsRecipientError) {
+          throw new RecipientUnreachableError();
+        }
+        throw retryError;
+      }
+    }
+  }
+
+  private async sendClientMessage(
+    chatId: string,
+    send: (to: string) => Promise<WwebjsMessage | undefined>,
+  ): Promise<WwebjsMessage> {
+    return this.sendResolved(chatId, async to => {
+      const message = await send(to);
+      if (!message) throw new UnresolvedWwebjsRecipientError(to);
+      return message;
+    });
+  }
+
   async sendTextMessage(chatId: string, text: string): Promise<MessageResult> {
     this.ensureReady();
-    const msg = await this.client!.sendMessage(chatId, text);
+    const msg = await this.sendClientMessage(chatId, to => this.client!.sendMessage(to, text));
     return {
       id: msg.id._serialized,
       timestamp: msg.timestamp,
@@ -650,9 +780,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       messageMedia = new MessageMedia(media.mimetype, media.data.toString('base64'), media.filename);
     }
 
-    const msg = await this.client!.sendMessage(chatId, messageMedia, {
-      caption: media.caption,
-    });
+    const msg = await this.sendClientMessage(chatId, to =>
+      this.client!.sendMessage(to, messageMedia, {
+        caption: media.caption,
+      }),
+    );
 
     return {
       id: msg.id._serialized,
@@ -695,7 +827,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   async getNumberId(number: string): Promise<string | null> {
     this.ensureReady();
     const numberId = await this.client!.getNumberId(number);
-    return numberId?._serialized ?? null;
+    const serialized = numberId?._serialized ?? null;
+    if (serialized?.endsWith('@lid')) {
+      this.rememberLidPhone(serialized, number);
+    }
+    return serialized;
   }
 
   async checkNumberExists(number: string): Promise<boolean> {
@@ -704,19 +840,18 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
   async resolveContactPhone(contactId: string): Promise<string | null> {
     this.ensureReady();
-    try {
-      // Queried one id at a time: the batch form is prone to "Evaluation failed" and rate-limiting
-      // (whatsapp-web.js #3857/#3969). `pn` is the phone JID (`<digits>@c.us`) when the account knows
-      // the mapping; best-effort, so a missing mapping or any failure resolves to null.
-      const [result] = await this.client!.getContactLidAndPhone([contactId]);
-      const pn = result?.pn;
-      return pn ? pn.replace(/@c\.us$/i, '').replace(/\D/g, '') || null : null;
-    } catch (error) {
-      this.logger.debug(`resolveContactPhone failed for ${contactId}`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return null;
+    const cached = this.lidToPhone.get(contactId);
+    if (cached) return cached;
+
+    // Query one id at a time: the batch form is prone to evaluation failures/rate-limiting. An
+    // absent pn is a definitive no-mapping answer, while a thrown lookup is transient and must not
+    // overwrite a mapping learned earlier in this session.
+    const [result] = await this.client!.getContactLidAndPhone([contactId]);
+    const phone = result?.pn ? this.normalizePhone(result.pn) || null : null;
+    if (phone) {
+      this.rememberLidPhone(result?.lid || (contactId.endsWith('@lid') ? contactId : undefined), phone);
     }
+    return phone;
   }
 
   async getGroups(): Promise<Group[]> {
@@ -757,7 +892,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       name: location.description || '',
       address: location.address || '',
     });
-    const msg = await this.client!.sendMessage(chatId, loc);
+    const msg = await this.sendClientMessage(chatId, to => this.client!.sendMessage(to, loc));
     return {
       id: msg.id._serialized,
       timestamp: msg.timestamp,
@@ -775,9 +910,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       'END:VCARD',
     ].join('\n');
 
-    const msg = await this.client!.sendMessage(chatId, vcard, {
-      parseVCards: true,
-    });
+    const msg = await this.sendClientMessage(chatId, to =>
+      this.client!.sendMessage(to, vcard, {
+        parseVCards: true,
+      }),
+    );
     return {
       id: msg.id._serialized,
       timestamp: msg.timestamp,
@@ -798,9 +935,11 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       messageMedia = new MessageMedia(media.mimetype, media.data.toString('base64'), media.filename);
     }
 
-    const msg = await this.client!.sendMessage(chatId, messageMedia, {
-      sendMediaAsSticker: true,
-    });
+    const msg = await this.sendClientMessage(chatId, to =>
+      this.client!.sendMessage(to, messageMedia, {
+        sendMediaAsSticker: true,
+      }),
+    );
     return {
       id: msg.id._serialized,
       timestamp: msg.timestamp,
@@ -818,7 +957,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       throw new Error(`Message ${quotedMsgId} not found`);
     }
 
-    const msg = await quotedMsg.reply(text);
+    const msg = await this.sendClientMessage(chatId, to => quotedMsg.reply(text, to));
     return {
       id: msg.id._serialized,
       timestamp: msg.timestamp,
@@ -835,7 +974,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       throw new Error(`Message ${messageId} not found`);
     }
 
-    await msgToForward.forward(toChatId);
+    await this.sendResolved(toChatId, to => msgToForward.forward(to));
     // forward() returns void, so we generate a result based on original message
     return {
       id: `fwd_${messageId}`,
@@ -1357,7 +1496,8 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   async sendChatState(chatId: string, state: ChatState): Promise<void> {
     this.ensureReady();
     try {
-      const chat = await this.client!.getChatById(chatId);
+      const to = await this.resolveSendId(chatId);
+      const chat = await this.client!.getChatById(to);
       if (state === 'typing') {
         await chat.sendStateTyping();
       } else if (state === 'recording') {
@@ -1367,7 +1507,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       }
     } catch (error) {
       // Presence is best-effort — a failure here must never break the surrounding send.
-      this.logger.error(`Error setting chat state '${state}' for ${chatId}`, String(error));
+      this.logger.warn(`Could not set chat state '${state}' for ${chatId} (best-effort)`, String(error));
     }
   }
 

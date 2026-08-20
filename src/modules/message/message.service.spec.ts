@@ -11,6 +11,7 @@ import { Template } from '../template/entities/template.entity';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
 import { EngineStatus } from '../../engine/interfaces/whatsapp-engine.interface';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
+import { RecipientUnreachableError } from '../../common/errors/recipient-unreachable.error';
 
 const mockEngineResult = { id: 'wa-msg-1', timestamp: 1706868000 };
 
@@ -209,7 +210,7 @@ describe('MessageService', () => {
         continue: true,
         data: { input: { chatId: '152695264563252@lid', text: 'hello' } },
       });
-      mockEngine.sendTextMessage.mockRejectedValueOnce(new Error('Evaluation failed'));
+      mockEngine.sendTextMessage.mockRejectedValueOnce(new RecipientUnreachableError());
 
       await expect(service.sendText('sess-1', { chatId: '152695264563252@lid', text: 'hello' })).rejects.toThrow(
         'WhatsApp could not resolve this contact to a sendable phone number',

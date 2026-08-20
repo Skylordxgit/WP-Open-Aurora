@@ -929,7 +929,9 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     try {
       phone = (await this.getEngine(sessionId)?.resolveContactPhone(contactId)) ?? null;
     } catch {
-      phone = null;
+      // A dead page/evaluation failure is transient. Do not turn it into a cached negative that
+      // suppresses future resolution attempts for the rest of this process.
+      return null;
     }
     // Bounded FIFO eviction: Map preserves insertion order, so the first key is the oldest.
     if (this.lidPhoneCache.size >= SessionService.LID_PHONE_CACHE_MAX) {
