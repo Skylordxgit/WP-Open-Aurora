@@ -155,6 +155,31 @@ describe('WhatsAppWebJsAdapter.resolveContactPhone (@lid -> phone, #263)', () =>
     ).resolves.toBeNull();
   });
 
+  it('falls back to a phone number already hydrated on the WhatsApp contact', async () => {
+    const adapter = new WhatsAppWebJsAdapter({ sessionId: 's', sessionDataPath: './data/sessions', puppeteer: {} });
+    (adapter as unknown as { status: EngineStatus }).status = EngineStatus.READY;
+    (adapter as unknown as { client: unknown }).client = {
+      getContactLidAndPhone: jest.fn().mockResolvedValue([]),
+      getContactById: jest.fn().mockResolvedValue({ number: '628555666777' }),
+    };
+
+    await expect(adapter.resolveContactPhone('123@lid')).resolves.toBe('628555666777');
+  });
+
+  it('falls back to WhatsApp Web alternate-WID runtime data when contact lookup is empty', async () => {
+    const evaluate = jest.fn().mockResolvedValue('628999888777@c.us');
+    const adapter = new WhatsAppWebJsAdapter({ sessionId: 's', sessionDataPath: './data/sessions', puppeteer: {} });
+    (adapter as unknown as { status: EngineStatus }).status = EngineStatus.READY;
+    (adapter as unknown as { client: unknown }).client = {
+      getContactLidAndPhone: jest.fn().mockResolvedValue([]),
+      getContactById: jest.fn().mockResolvedValue({ number: '123' }),
+      pupPage: { evaluate },
+    };
+
+    await expect(adapter.resolveContactPhone('123@lid')).resolves.toBe('628999888777');
+    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), '123@lid');
+  });
+
   it('propagates a transient engine failure so callers do not cache it as a missing mapping', async () => {
     const adapter = readyAdapter(jest.fn().mockRejectedValue(new Error('Evaluation failed')));
     await expect(adapter.resolveContactPhone('123@lid')).rejects.toThrow('Evaluation failed');

@@ -141,6 +141,16 @@ class UnresolvedWwebjsRecipientError extends Error {
   }
 }
 
+interface RuntimeWid {
+  _serialized?: string;
+  user?: string;
+  server?: string;
+}
+
+interface WwebjsRuntimeWindow {
+  require(moduleName: string): unknown;
+}
+
 export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngine {
   private client: Client | null = null;
   private status: EngineStatus = EngineStatus.DISCONNECTED;
@@ -278,6 +288,15 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
               name: contact.name || incomingMessage.contact?.name,
               pushName: contact.pushname || incomingMessage.contact?.pushName,
             };
+          }
+          const senderId = msg.author ?? msg.from;
+          if (senderId.endsWith('@lid') && contact?.number) {
+            this.rememberLidPhone(senderId, contact.number);
+            const senderPhone = this.normalizePhone(contact.number);
+            const lidDigits = senderId.split('@')[0].replace(/\D/g, '');
+            if (senderPhone && senderPhone !== lidDigits) {
+              incomingMessage.senderPhone = senderPhone;
+            }
           }
         } catch (error) {
           this.logger.error('Error getting message contact', String(error));
@@ -843,15 +862,78 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     const cached = this.lidToPhone.get(contactId);
     if (cached) return cached;
 
-    // Query one id at a time: the batch form is prone to evaluation failures/rate-limiting. An
-    // absent pn is a definitive no-mapping answer, while a thrown lookup is transient and must not
-    // overwrite a mapping learned earlier in this session.
-    const [result] = await this.client!.getContactLidAndPhone([contactId]);
-    const phone = result?.pn ? this.normalizePhone(result.pn) || null : null;
-    if (phone) {
-      this.rememberLidPhone(result?.lid || (contactId.endsWith('@lid') ? contactId : undefined), phone);
+    let lookupError: unknown;
+    try {
+      // Query one id at a time: the batch form is prone to evaluation failures/rate-limiting.
+      const [result] = await this.client!.getContactLidAndPhone([contactId]);
+      const phone = result?.pn ? this.normalizePhone(result.pn) || null : null;
+      if (phone) {
+        this.rememberLidPhone(result?.lid || (contactId.endsWith('@lid') ? contactId : undefined), phone);
+        return phone;
+      }
+    } catch (error) {
+      lookupError = error;
     }
-    return phone;
+
+    // Recent WhatsApp builds can have the contact hydrated locally even when the explicit
+    // LID/phone query returns an empty result. Reuse that loaded contact before touching internals.
+    try {
+      const contact = await this.client!.getContactById(contactId);
+      const phone = this.validPhoneForLid(contactId, contact?.number);
+      if (phone) {
+        this.rememberLidPhone(contactId, phone);
+        return phone;
+      }
+    } catch {
+      // Continue to the runtime alternate-WID lookup.
+    }
+
+    const runtimePhone = await this.resolveContactPhoneFromRuntime(contactId).catch(() => null);
+    if (runtimePhone) {
+      this.rememberLidPhone(contactId, runtimePhone);
+      return runtimePhone;
+    }
+
+    // Preserve transient failures so callers retry rather than caching a false missing mapping.
+    if (lookupError instanceof Error) throw lookupError;
+    if (lookupError) throw new Error('WhatsApp contact lookup failed');
+    return null;
+  }
+
+  private validPhoneForLid(contactId: string, candidate?: string | null): string | null {
+    const phone = candidate ? this.normalizePhone(candidate) : '';
+    const lidDigits = contactId.endsWith('@lid') ? contactId.split('@')[0].replace(/\D/g, '') : '';
+    return phone && phone !== lidDigits ? phone : null;
+  }
+
+  private async resolveContactPhoneFromRuntime(contactId: string): Promise<string | null> {
+    const page = (
+      this.client as unknown as {
+        pupPage?: { evaluate: <T>(callback: (id: string) => T, id: string) => Promise<T> };
+      }
+    )?.pupPage;
+    if (!page) return null;
+
+    const serialized = await page.evaluate((id: string) => {
+      try {
+        const runtime = window as unknown as WwebjsRuntimeWindow;
+        const widFactory = runtime.require('WAWebWidFactory') as {
+          createWid(value: string): RuntimeWid;
+        };
+        const contactApi = runtime.require('WAWebApiContact') as {
+          getPhoneNumber(wid: RuntimeWid): RuntimeWid | null | undefined;
+          getAlternateUserWid(wid: RuntimeWid): RuntimeWid | null | undefined;
+        };
+        const wid = widFactory.createWid(id);
+        const phone = contactApi.getPhoneNumber(wid) ?? contactApi.getAlternateUserWid(wid);
+        if (!phone) return null;
+        return phone._serialized ?? (phone.user && phone.server ? `${phone.user}@${phone.server}` : null);
+      } catch {
+        return null;
+      }
+    }, contactId);
+
+    return this.validPhoneForLid(contactId, serialized);
   }
 
   async getGroups(): Promise<Group[]> {
