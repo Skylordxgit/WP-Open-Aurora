@@ -158,14 +158,14 @@ export class StatsService {
         .select('m.direction', 'direction')
         .addSelect('COUNT(*)', 'count')
         .groupBy('m.direction')
-        .getRawMany<{ direction: string; count: string }>(),
+        .getRawMany<{ direction: MessageDirection; count: string }>(),
       this.messageRepo
         .createQueryBuilder('m')
         .select('m.direction', 'direction')
         .addSelect('COUNT(*)', 'count')
         .where('m.createdAt >= :todayStart', { todayStart: this.startOfDay(new Date()) })
         .groupBy('m.direction')
-        .getRawMany<{ direction: string; count: string }>(),
+        .getRawMany<{ direction: MessageDirection; count: string }>(),
       this.messageRepo.count({ where: { status: MessageStatus.FAILED } }),
     ]);
 
@@ -176,10 +176,22 @@ export class StatsService {
       if (session.status === SessionStatus.READY) active++;
     }
 
-    const sent = parseInt(overallDirectionCounts.find(row => row.direction === MessageDirection.OUTGOING)?.count || '0', 10);
-    const received = parseInt(overallDirectionCounts.find(row => row.direction === MessageDirection.INCOMING)?.count || '0', 10);
-    const todaySent = parseInt(todayDirectionCounts.find(row => row.direction === MessageDirection.OUTGOING)?.count || '0', 10);
-    const todayReceived = parseInt(todayDirectionCounts.find(row => row.direction === MessageDirection.INCOMING)?.count || '0', 10);
+    const sent = parseInt(
+      overallDirectionCounts.find(row => row.direction === MessageDirection.OUTGOING)?.count || '0',
+      10,
+    );
+    const received = parseInt(
+      overallDirectionCounts.find(row => row.direction === MessageDirection.INCOMING)?.count || '0',
+      10,
+    );
+    const todaySent = parseInt(
+      todayDirectionCounts.find(row => row.direction === MessageDirection.OUTGOING)?.count || '0',
+      10,
+    );
+    const todayReceived = parseInt(
+      todayDirectionCounts.find(row => row.direction === MessageDirection.INCOMING)?.count || '0',
+      10,
+    );
 
     const analytics = this.buildPeriodAnalytics(sessions, periodMessages, range);
 
@@ -341,22 +353,20 @@ export class StatsService {
 
     for (const message of messages) {
       const session = sessionNameMap.get(message.sessionId);
-      const accumulator =
-        sessionMap.get(message.sessionId) ||
-        {
-          sessionId: message.sessionId,
-          name: session?.name || message.sessionId,
-          status: session?.status || SessionStatus.DISCONNECTED,
-          phone: session?.phone || undefined,
-          incoming: 0,
-          outgoing: 0,
-          failed: 0,
-          handledChatIds: new Set<string>(),
-          activeChatIds: new Set<string>(),
-          responseTimes: [],
-          lastResponseAt: null,
-          lastInboundAt: null,
-        };
+      const accumulator = sessionMap.get(message.sessionId) || {
+        sessionId: message.sessionId,
+        name: session?.name || message.sessionId,
+        status: session?.status || SessionStatus.DISCONNECTED,
+        phone: session?.phone || undefined,
+        incoming: 0,
+        outgoing: 0,
+        failed: 0,
+        handledChatIds: new Set<string>(),
+        activeChatIds: new Set<string>(),
+        responseTimes: [],
+        lastResponseAt: null,
+        lastInboundAt: null,
+      };
       sessionMap.set(message.sessionId, accumulator);
 
       const occurredAt = this.getMessageTime(message);
@@ -382,7 +392,9 @@ export class StatsService {
         accumulator.handledChatIds.add(message.chatId);
         totalHandledChats.add(chatStateKey);
         accumulator.lastResponseAt =
-          !accumulator.lastResponseAt || occurredAt > accumulator.lastResponseAt ? occurredAt : accumulator.lastResponseAt;
+          !accumulator.lastResponseAt || occurredAt > accumulator.lastResponseAt
+            ? occurredAt
+            : accumulator.lastResponseAt;
         if (timeSeries) timeSeries.sent += 1;
         if (activity) {
           activity.sent += 1;

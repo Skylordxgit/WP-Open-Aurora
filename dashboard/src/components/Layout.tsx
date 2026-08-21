@@ -36,31 +36,137 @@ import './Layout.css';
 interface LayoutProps {
   onLogout: () => void;
   omegaRole: OmegaRole;
+  currentUser: {
+    fullName: string;
+    email: string;
+    role: OmegaRole;
+    workspaceName?: string | null;
+    teamName?: string | null;
+    status: 'active' | 'inactive';
+  };
+}
+
+function formatRole(role: OmegaRole) {
+  const labels: Record<OmegaRole, string> = {
+    super_admin: 'Master Admin',
+    support_admin: 'Super Admin',
+    client_admin: 'Admin',
+    client_agent: 'Employee',
+  };
+
+  return labels[role];
+}
+
+function getInitials(name: string) {
+  return name
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(part => part[0]?.toUpperCase() ?? '')
+    .join('');
 }
 
 const allNavItems = [
-  { to: '/', icon: LayoutDashboard, key: 'dashboard' as const, label: 'Dashboard', roles: ['super_admin', 'support_admin', 'client_admin'] },
-  { to: '/chats', icon: MessageSquare, key: 'chats' as const, label: 'Chats', roles: ['super_admin', 'support_admin', 'client_admin'] },
-  { to: '/templates', icon: ClipboardList, key: 'templates' as const, label: 'Templates', roles: ['super_admin', 'support_admin', 'client_admin'] },
-  { to: '/bulk-messaging', icon: Megaphone, key: 'bulkMessaging' as const, label: 'Bulk Messaging', roles: ['super_admin', 'support_admin', 'client_admin'] },
-  { to: '/message-tester', icon: Send, key: 'messageTester' as const, label: 'Message Tester', roles: ['super_admin', 'support_admin', 'client_admin'] },
-  { to: '/contacts', icon: Users2, key: 'contacts' as const, label: 'Contacts', roles: ['super_admin', 'support_admin', 'client_admin'] },
-  { to: '/sessions', icon: Smartphone, key: 'sessions' as const, label: 'Sessions', roles: ['super_admin', 'support_admin', 'client_admin'] },
-  { to: '/bot', icon: Bot, key: 'bot' as const, label: 'Bot', roles: ['super_admin', 'support_admin', 'client_admin'] },
-  { to: '/clients', icon: Building2, key: 'clients' as const, label: 'Workspaces', roles: ['super_admin', 'support_admin'] },
-  { to: '/users', icon: Users2, key: 'users' as const, label: 'Users', roles: ['super_admin', 'support_admin', 'client_admin'] },
-  { to: '/teams', icon: Users2, key: 'teams' as const, label: 'Teams', roles: ['super_admin', 'support_admin', 'client_admin'] },
-  { to: '/webhooks', icon: Webhook, key: 'webhooks' as const, label: 'Webhooks', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  {
+    to: '/',
+    icon: LayoutDashboard,
+    key: 'dashboard' as const,
+    label: 'Dashboard',
+    roles: ['super_admin', 'support_admin', 'client_admin'],
+  },
+  {
+    to: '/sessions',
+    icon: Smartphone,
+    key: 'sessions' as const,
+    label: 'Sessions',
+    roles: ['super_admin', 'support_admin', 'client_admin'],
+  },
+  {
+    to: '/chats',
+    icon: MessageSquare,
+    key: 'chats' as const,
+    label: 'Chats',
+    roles: ['super_admin', 'support_admin', 'client_admin'],
+  },
+  {
+    to: '/webhooks',
+    icon: Webhook,
+    key: 'webhooks' as const,
+    label: 'Webhooks',
+    roles: ['super_admin', 'client_admin'],
+  },
+  {
+    to: '/templates',
+    icon: ClipboardList,
+    key: 'templates' as const,
+    label: 'Templates',
+    roles: ['super_admin', 'support_admin', 'client_admin'],
+  },
+  {
+    to: '/contacts',
+    icon: Users2,
+    key: 'contacts' as const,
+    label: 'Contacts',
+    roles: ['super_admin', 'support_admin', 'client_admin'],
+  },
   { to: '/api-keys', icon: Key, key: 'apiKeys' as const, label: 'API Keys', roles: ['super_admin'] },
-  { to: '/branding', icon: Palette, key: 'branding' as const, label: 'Branding', roles: ['super_admin', 'support_admin'] },
-  { to: '/infrastructure', icon: Server, key: 'infrastructure' as const, label: 'Infrastructure', roles: ['super_admin'] },
+  {
+    to: '/clients',
+    icon: Building2,
+    key: 'clients' as const,
+    label: 'Workspaces',
+    roles: ['super_admin'],
+  },
+  {
+    to: '/users',
+    icon: Users2,
+    key: 'users' as const,
+    label: 'Users',
+    roles: ['super_admin', 'support_admin', 'client_admin'],
+  },
+  {
+    to: '/teams',
+    icon: Users2,
+    key: 'teams' as const,
+    label: 'Teams',
+    roles: ['super_admin', 'support_admin', 'client_admin'],
+  },
+  { to: '/bot', icon: Bot, key: 'bot' as const, label: 'Bot', roles: ['super_admin', 'support_admin', 'client_admin'] },
+  {
+    to: '/bulk-messaging',
+    icon: Megaphone,
+    key: 'bulkMessaging' as const,
+    label: 'Bulk Messaging',
+    roles: ['super_admin', 'support_admin', 'client_admin'],
+  },
+  {
+    to: '/message-tester',
+    icon: Send,
+    key: 'messageTester' as const,
+    label: 'Message Tester',
+    roles: ['super_admin', 'support_admin', 'client_admin'],
+  },
+  {
+    to: '/branding',
+    icon: Palette,
+    key: 'branding' as const,
+    label: 'Branding',
+    roles: ['super_admin', 'support_admin'],
+  },
+  {
+    to: '/infrastructure',
+    icon: Server,
+    key: 'infrastructure' as const,
+    label: 'Infrastructure',
+    roles: ['super_admin'],
+  },
   { to: '/plugins', icon: Puzzle, key: 'plugins' as const, label: 'Plugins', roles: ['super_admin'] },
   { to: '/logs', icon: FileText, key: 'logs' as const, label: 'Logs', roles: ['super_admin', 'support_admin'] },
 ];
 
 const themeIcons = { light: Sun, dark: Moon, system: Monitor };
 
-export function Layout({ onLogout, omegaRole }: LayoutProps) {
+export function Layout({ onLogout, omegaRole, currentUser }: LayoutProps) {
   const { t, i18n } = useTranslation();
   const { theme, toggleTheme } = useTheme();
   const branding = useBranding();
@@ -69,7 +175,7 @@ export function Layout({ onLogout, omegaRole }: LayoutProps) {
 
   const navItems = allNavItems.filter(item => item.roles.includes(omegaRole));
 
-  const [isCollapsed, setIsCollapsed] = useState(true);
+  const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const [isLanguageMenuOpen, setIsLanguageMenuOpen] = useState(false);
@@ -164,9 +270,17 @@ export function Layout({ onLogout, omegaRole }: LayoutProps) {
             title={isCollapsed ? t('common.expand') : t('common.collapse')}
             aria-label={isCollapsed ? t('common.expand') : t('common.collapse')}
           >
-            {isCollapsed
-              ? (isRtl ? <ChevronLeft size={16} /> : <ChevronRight size={16} />)
-              : (isRtl ? <ChevronRight size={16} /> : <ChevronLeft size={16} />)}
+            {isCollapsed ? (
+              isRtl ? (
+                <ChevronLeft size={16} />
+              ) : (
+                <ChevronRight size={16} />
+              )
+            ) : isRtl ? (
+              <ChevronRight size={16} />
+            ) : (
+              <ChevronLeft size={16} />
+            )}
           </button>
         )}
 
@@ -190,6 +304,18 @@ export function Layout({ onLogout, omegaRole }: LayoutProps) {
         </nav>
 
         <div className="sidebar-footer">
+          <div className="admin-profile-card" title={isCollapsed ? currentUser.fullName : undefined}>
+            <div className="admin-profile-avatar">{getInitials(currentUser.fullName)}</div>
+            {!isCollapsed && (
+              <div className="admin-profile-copy">
+                <strong>{currentUser.fullName}</strong>
+                <span>{formatRole(currentUser.role)}</span>
+                <small>{currentUser.email}</small>
+                <small>{currentUser.teamName ?? currentUser.workspaceName ?? 'Global access'}</small>
+              </div>
+            )}
+          </div>
+
           <div className="language-menu" ref={languageMenuRef}>
             <button
               className="theme-toggle-btn"
@@ -218,11 +344,7 @@ export function Layout({ onLogout, omegaRole }: LayoutProps) {
               </div>
             )}
           </div>
-          <button
-            className="theme-toggle-btn"
-            onClick={toggleTheme}
-            title={t('theme.label', { value: themeLabel })}
-          >
+          <button className="theme-toggle-btn" onClick={toggleTheme} title={t('theme.label', { value: themeLabel })}>
             <ThemeIcon size={18} />
             {!isCollapsed && <span>{themeLabel}</span>}
           </button>

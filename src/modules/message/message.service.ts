@@ -583,6 +583,24 @@ export class MessageService {
       return digits && digits !== privacyIdDigits ? digits : null;
     };
 
+    // Fast path: reuse the latest persisted sender-phone mapping for this chat before asking the live
+    // engine to re-scan WhatsApp state. This avoids a slow resolveContactPhone round-trip for chats we
+    // have already seen or synchronized once.
+    try {
+      const lastStoredMessage = await this.messageRepository.findOne({
+        where: { chatId },
+        order: { createdAt: 'DESC' },
+      });
+      const senderPhone = lastStoredMessage?.metadata?.senderPhone;
+      const storedPhone =
+        typeof senderPhone === 'string' || typeof senderPhone === 'number'
+          ? normalizeCandidate(String(senderPhone))
+          : null;
+      if (storedPhone) return storedPhone;
+    } catch {
+      // Preserve the live engine resolution path below when the local cache lookup fails.
+    }
+
     try {
       const resolved = normalizeCandidate(await engine.resolveContactPhone(chatId));
       if (resolved) return resolved;

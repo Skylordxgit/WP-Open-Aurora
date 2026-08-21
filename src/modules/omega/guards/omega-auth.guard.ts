@@ -22,6 +22,11 @@ export class OmegaAuthGuard implements CanActivate {
 
     if (token) {
       const session = await this.omegaAuthService.validateSessionToken(token);
+      this.omegaAuthService.assertPasswordChangeSatisfied(
+        session.user,
+        request.path ?? request.originalUrl ?? '',
+        request.method ?? 'GET',
+      );
       request.omegaUser = session.user;
       request.omegaToken = token;
       return true;
@@ -46,9 +51,11 @@ export class OmegaAuthGuard implements CanActivate {
       email: 'openwa-admin@local',
       passwordHash: '',
       clientId: null,
+      teamId: null,
       role: OmegaUserRole.SUPER_ADMIN,
       status: OmegaUserStatus.ACTIVE,
       isOnDuty: true,
+      mustChangePassword: false,
       lastLoginAt: apiKey.lastUsedAt ?? null,
       createdAt: apiKey.createdAt,
       updatedAt: apiKey.updatedAt,

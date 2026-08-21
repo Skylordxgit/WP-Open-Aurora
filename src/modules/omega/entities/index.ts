@@ -1,6 +1,7 @@
 export * from './omega.enums';
 export * from './omega-user.entity';
 export * from './omega-client.entity';
+export * from './omega-team.entity';
 export * from './omega-plan.entity';
 export * from './omega-whatsapp-session.entity';
 export * from './omega-contact.entity';
@@ -8,6 +9,8 @@ export * from './omega-contact-group.entity';
 export * from './omega-campaign.entity';
 export * from './omega-campaign-recipient.entity';
 export * from './omega-message.entity';
+export * from './omega-conversation.entity';
+export * from './omega-conversation-event.entity';
 export * from './omega-usage-log.entity';
 export * from './omega-subscription.entity';
 export * from './omega-auth-session.entity';

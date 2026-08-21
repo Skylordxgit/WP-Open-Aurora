@@ -20,6 +20,10 @@ export class CreateOmegaUserDto {
   clientId?: string | null;
 
   @IsOptional()
+  @IsString()
+  teamId?: string | null;
+
+  @IsOptional()
   @IsBoolean()
   isOnDuty?: boolean;
 }
@@ -49,6 +53,10 @@ export class UpdateOmegaUserDto {
   @IsOptional()
   @IsString()
   clientId?: string | null;
+
+  @IsOptional()
+  @IsString()
+  teamId?: string | null;
 
   @IsOptional()
   @IsBoolean()

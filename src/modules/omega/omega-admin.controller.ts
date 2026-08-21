@@ -6,10 +6,12 @@ import {
   AssignOmegaSessionDto,
   CreateOmegaClientDto,
   CreateOmegaPlanDto,
+  CreateOmegaTeamDto,
   CreateOmegaUserDto,
   UpdateOmegaSessionReplacementDto,
   UpdateOmegaClientDto,
   UpdateOmegaPlanDto,
+  UpdateOmegaTeamDto,
   UpdateOmegaUserDto,
 } from './dto';
 import { OmegaUser, OmegaUserRole } from './entities';
@@ -28,6 +30,17 @@ export class OmegaAdminController {
   @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
   getDashboard(@CurrentOmegaUser() user: OmegaUser) {
     return this.omegaAdminService.getDashboardSummary(user);
+  }
+
+  @Get('admin/dashboard/employee-analytics')
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  getEmployeeAnalytics(
+    @CurrentOmegaUser() user: OmegaUser,
+    @Query('preset') preset?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+  ) {
+    return this.omegaAdminService.getEmployeeAnalytics(user, { preset, startDate, endDate });
   }
 
   @Get('usage')
@@ -76,6 +89,24 @@ export class OmegaAdminController {
   @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN)
   updateClient(@Param('id') id: string, @Body() dto: UpdateOmegaClientDto) {
     return this.omegaAdminService.updateClient(id, dto);
+  }
+
+  @Get('teams')
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  listTeams(@CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.listTeams(user);
+  }
+
+  @Post('teams')
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  createTeam(@Body() dto: CreateOmegaTeamDto, @CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.createTeam(dto, user);
+  }
+
+  @Patch('teams/:id')
+  @RequireOmegaRoles(OmegaUserRole.SUPER_ADMIN, OmegaUserRole.SUPPORT_ADMIN, OmegaUserRole.CLIENT_ADMIN)
+  updateTeam(@Param('id') id: string, @Body() dto: UpdateOmegaTeamDto, @CurrentOmegaUser() user: OmegaUser) {
+    return this.omegaAdminService.updateTeam(id, dto, user);
   }
 
   @Get('plans')

@@ -23,6 +23,10 @@ export class OmegaAuthController {
   @Post('login')
   async login(@Body() dto: OmegaLoginDto) {
     const { token, user, expiresAt } = await this.omegaAuthService.login(dto.email, dto.password);
+    const [companyName, teamName] = await Promise.all([
+      this.omegaAdminService.getClientCompanyName(user.clientId),
+      this.omegaAdminService.getTeamName(user.teamId),
+    ]);
     return {
       token,
       expiresAt,
@@ -32,8 +36,13 @@ export class OmegaAuthController {
         email: user.email,
         role: user.role,
         clientId: user.clientId,
+        teamId: user.teamId,
+        companyName,
+        workspaceName: companyName,
+        teamName,
         status: user.status,
         isOnDuty: user.isOnDuty,
+        mustChangePassword: user.mustChangePassword,
       },
     };
   }
@@ -41,16 +50,23 @@ export class OmegaAuthController {
   @Get('me')
   @UseGuards(OmegaAuthGuard)
   async me(@CurrentOmegaUser() user: OmegaUser) {
-    const companyName = await this.omegaAdminService.getClientCompanyName(user.clientId);
+    const [companyName, teamName] = await Promise.all([
+      this.omegaAdminService.getClientCompanyName(user.clientId),
+      this.omegaAdminService.getTeamName(user.teamId),
+    ]);
     return {
       id: user.id,
       fullName: user.fullName,
       email: user.email,
       role: user.role,
       clientId: user.clientId,
+      teamId: user.teamId,
       companyName,
+      workspaceName: companyName,
+      teamName,
       status: user.status,
       isOnDuty: user.isOnDuty,
+      mustChangePassword: user.mustChangePassword,
       lastLoginAt: user.lastLoginAt,
     };
   }
@@ -63,16 +79,23 @@ export class OmegaAuthController {
       password: dto.password,
       isOnDuty: dto.isOnDuty,
     });
-    const companyName = await this.omegaAdminService.getClientCompanyName(updatedUser.clientId);
+    const [companyName, teamName] = await Promise.all([
+      this.omegaAdminService.getClientCompanyName(updatedUser.clientId),
+      this.omegaAdminService.getTeamName(updatedUser.teamId),
+    ]);
     return {
       id: updatedUser.id,
       fullName: updatedUser.fullName,
       email: updatedUser.email,
       role: updatedUser.role,
       clientId: updatedUser.clientId,
+      teamId: updatedUser.teamId,
       companyName,
+      workspaceName: companyName,
+      teamName,
       status: updatedUser.status,
       isOnDuty: updatedUser.isOnDuty,
+      mustChangePassword: updatedUser.mustChangePassword,
       lastLoginAt: updatedUser.lastLoginAt,
     };
   }

@@ -9,6 +9,7 @@ type UserFormState = {
   role: OmegaUser['role'];
   status: OmegaUser['status'];
   clientId: string;
+  teamId: string;
 };
 
 function buildUserForm(user: OmegaUser): UserFormState {
@@ -19,13 +20,14 @@ function buildUserForm(user: OmegaUser): UserFormState {
     role: user.role,
     status: user.status,
     clientId: user.clientId ?? '',
+    teamId: user.teamId ?? '',
   };
 }
 
 function formatRole(role: OmegaUser['role']) {
   const roleLabels: Record<OmegaUser['role'], string> = {
-    super_admin: 'Super Admin',
-    support_admin: 'Admin',
+    super_admin: 'Master Admin',
+    support_admin: 'Super Admin',
     client_admin: 'Sub Admin',
     client_agent: 'Employee',
   };
@@ -40,8 +42,24 @@ function formatDate(value?: string | null) {
 export function OmegaStaff() {
   const queryClient = useQueryClient();
   const actorRole = (localStorage.getItem('omega_user_role') as OmegaUser['role'] | null) ?? 'super_admin';
-  const { data: users = [], isLoading, error } = useQuery({ queryKey: ['omega-users'], queryFn: omegaApi.users });
-  const { data: clients = [] } = useQuery({ queryKey: ['omega-clients'], queryFn: omegaApi.clients });
+  const { data: users = [], isLoading, error } = useQuery({
+    queryKey: ['omega-users'],
+    queryFn: omegaApi.users,
+    staleTime: 15_000,
+    refetchOnWindowFocus: false,
+  });
+  const { data: clients = [] } = useQuery({
+    queryKey: ['omega-clients'],
+    queryFn: omegaApi.clients,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+  const { data: teams = [] } = useQuery({
+    queryKey: ['omega-teams'],
+    queryFn: omegaApi.teams,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
   const visibleRolePills = useMemo(() => {
     if (actorRole === 'super_admin') {
       return ['super_admin', 'support_admin', 'client_admin', 'client_agent'] as OmegaUser['role'][];
@@ -68,6 +86,7 @@ export function OmegaStaff() {
     password: 'ChangeMe123!',
     role: (availableRoles.includes('client_agent') ? 'client_agent' : availableRoles[0]) as OmegaUser['role'],
     clientId: '',
+    teamId: '',
   });
   const [selectedRole, setSelectedRole] = useState<'all' | OmegaUser['role']>('all');
   const [selectedStatus, setSelectedStatus] = useState<'all' | OmegaUser['status']>('active');
@@ -78,13 +97,26 @@ export function OmegaStaff() {
 
   const invalidateUsers = () => queryClient.invalidateQueries({ queryKey: ['omega-users'] });
   const invalidateClients = () => queryClient.invalidateQueries({ queryKey: ['omega-clients'] });
+  const invalidateTeams = () => queryClient.invalidateQueries({ queryKey: ['omega-teams'] });
 
   const createMutation = useMutation({
-    mutationFn: () => omegaApi.createUser({ ...createForm, clientId: createForm.clientId || null }),
+    mutationFn: () =>
+      omegaApi.createUser({
+        ...createForm,
+        clientId: createForm.clientId || null,
+        teamId: createForm.teamId || null,
+      }),
     onSuccess: async () => {
-      setCreateForm({ fullName: '', email: '', password: 'ChangeMe123!', role: 'client_agent', clientId: '' });
+      setCreateForm({
+        fullName: '',
+        email: '',
+        password: 'ChangeMe123!',
+        role: 'client_agent',
+        clientId: '',
+        teamId: '',
+      });
       setIsCreateModalOpen(false);
-      await Promise.all([invalidateUsers(), invalidateClients()]);
+      await Promise.all([invalidateUsers(), invalidateClients(), invalidateTeams()]);
     },
   });
 
@@ -93,9 +125,19 @@ export function OmegaStaff() {
     onSuccess: async () => {
       setEditingUserId(null);
       setEditForm(null);
-      await Promise.all([invalidateUsers(), invalidateClients()]);
+      await Promise.all([invalidateUsers(), invalidateClients(), invalidateTeams()]);
     },
   });
+
+  const teamsByWorkspace = useMemo(() => {
+    const map = new Map<string, typeof teams>();
+    teams.forEach(team => {
+      const entry = map.get(team.clientId) ?? [];
+      entry.push(team);
+      map.set(team.clientId, entry);
+    });
+    return map;
+  }, [teams]);
 
   const visibleUsers = useMemo(() => {
     return users.filter(user => {
@@ -133,7 +175,15 @@ export function OmegaStaff() {
       if (selectedStatus !== 'all' && user.status !== selectedStatus) return false;
       if (!normalizedSearch) return true;
 
-      const haystack = [user.fullName, user.email, user.companyName ?? '', formatRole(user.role)].join(' ').toLowerCase();
+      const haystack = [
+        user.fullName,
+        user.email,
+        user.workspaceName ?? user.companyName ?? '',
+        user.teamName ?? '',
+        formatRole(user.role),
+      ]
+        .join(' ')
+        .toLowerCase();
       return haystack.includes(normalizedSearch);
     });
   }, [searchTerm, selectedRole, selectedStatus, visibleUsers]);
@@ -172,26 +222,46 @@ export function OmegaStaff() {
             <span>Total users</span>
             <strong>{visibleUsers.length}</strong>
           </div>
-          <button className={`omega-filter-pill${selectedRole === 'all' ? ' active' : ''}`} type="button" onClick={() => setSelectedRole('all')}>
+          <button
+            className={`omega-filter-pill${selectedRole === 'all' ? ' active' : ''}`}
+            type="button"
+            onClick={() => setSelectedRole('all')}
+          >
             All roles {visibleUsers.length}
           </button>
           {visibleRolePills.includes('super_admin') && (
-            <button className={`omega-filter-pill${selectedRole === 'super_admin' ? ' active' : ''}`} type="button" onClick={() => setSelectedRole('super_admin')}>
-              Super Admin {roleStats.super_admin}
+            <button
+              className={`omega-filter-pill${selectedRole === 'super_admin' ? ' active' : ''}`}
+              type="button"
+              onClick={() => setSelectedRole('super_admin')}
+            >
+              Master Admin {roleStats.super_admin}
             </button>
           )}
           {visibleRolePills.includes('support_admin') && (
-            <button className={`omega-filter-pill${selectedRole === 'support_admin' ? ' active' : ''}`} type="button" onClick={() => setSelectedRole('support_admin')}>
-              Admin {roleStats.support_admin}
+            <button
+              className={`omega-filter-pill${selectedRole === 'support_admin' ? ' active' : ''}`}
+              type="button"
+              onClick={() => setSelectedRole('support_admin')}
+            >
+              Super Admin {roleStats.support_admin}
             </button>
           )}
           {visibleRolePills.includes('client_admin') && (
-            <button className={`omega-filter-pill${selectedRole === 'client_admin' ? ' active' : ''}`} type="button" onClick={() => setSelectedRole('client_admin')}>
+            <button
+              className={`omega-filter-pill${selectedRole === 'client_admin' ? ' active' : ''}`}
+              type="button"
+              onClick={() => setSelectedRole('client_admin')}
+            >
               Sub Admin {roleStats.client_admin}
             </button>
           )}
           {visibleRolePills.includes('client_agent') && (
-            <button className={`omega-filter-pill${selectedRole === 'client_agent' ? ' active' : ''}`} type="button" onClick={() => setSelectedRole('client_agent')}>
+            <button
+              className={`omega-filter-pill${selectedRole === 'client_agent' ? ' active' : ''}`}
+              type="button"
+              onClick={() => setSelectedRole('client_agent')}
+            >
               Employee {roleStats.client_agent}
             </button>
           )}
@@ -201,7 +271,10 @@ export function OmegaStaff() {
           <button className="omega-primary-button" type="button" onClick={() => setIsCreateModalOpen(true)}>
             Add User
           </button>
-          <select value={selectedStatus} onChange={event => setSelectedStatus(event.target.value as 'all' | OmegaUser['status'])}>
+          <select
+            value={selectedStatus}
+            onChange={event => setSelectedStatus(event.target.value as 'all' | OmegaUser['status'])}
+          >
             <option value="all">All statuses</option>
             <option value="active">Active</option>
             <option value="inactive">Inactive</option>
@@ -219,6 +292,7 @@ export function OmegaStaff() {
             <span>User</span>
             <span>Role</span>
             <span>Status</span>
+            <span>Workspace</span>
             <span>Team</span>
             <span>Last Login</span>
             <span>Actions</span>
@@ -230,7 +304,8 @@ export function OmegaStaff() {
                 <div className="omega-user-cell omega-user-main">
                   <strong>{user.fullName}</strong>
                   <p>{user.email}</p>
-                  <p>{user.companyName ?? 'No team assigned yet'}</p>
+                  <p>{user.workspaceName ?? user.companyName ?? 'No workspace assigned yet'}</p>
+                  <p>{user.teamName ?? 'No team assigned yet'}</p>
                 </div>
                 <div className="omega-user-cell">
                   <span className="omega-user-role">{formatRole(user.role)}</span>
@@ -241,7 +316,10 @@ export function OmegaStaff() {
                   </span>
                 </div>
                 <div className="omega-user-cell">
-                  <span>{user.companyName ?? 'Unassigned'}</span>
+                  <span>{user.workspaceName ?? user.companyName ?? 'Unassigned'}</span>
+                </div>
+                <div className="omega-user-cell">
+                  <span>{user.teamName ?? 'Unassigned'}</span>
                 </div>
                 <div className="omega-user-cell">
                   <span>{formatDate(user.lastLoginAt)}</span>
@@ -285,7 +363,7 @@ export function OmegaStaff() {
             <div className="omega-card-header">
               <div>
                 <h2>Edit User</h2>
-                <p>Update user details, team scope, role, status, and password from one popup.</p>
+                <p>Update user details, workspace scope, team scope, role, status, and password from one popup.</p>
               </div>
             </div>
 
@@ -302,6 +380,7 @@ export function OmegaStaff() {
                       role: editForm.role,
                       status: editForm.status,
                       clientId: editForm.clientId || null,
+                      teamId: editForm.teamId || null,
                       ...(editForm.password ? { password: editForm.password } : {}),
                     },
                   });
@@ -340,23 +419,47 @@ export function OmegaStaff() {
                     <span>Status</span>
                     <select
                       value={editForm.status}
-                      onChange={event => setEditForm({ ...editForm, status: event.target.value as OmegaUser['status'] })}
+                      onChange={event =>
+                        setEditForm({ ...editForm, status: event.target.value as OmegaUser['status'] })
+                      }
                     >
                       <option value="active">Active</option>
                       <option value="inactive">Inactive</option>
                     </select>
                   </label>
                   <label>
-                    <span>Team / Client Scope</span>
+                    <span>Workspace</span>
                     <select
                       value={editForm.clientId}
                       disabled={!canChooseClient}
-                      onChange={event => setEditForm({ ...editForm, clientId: event.target.value })}
+                      onChange={event => {
+                        const nextClientId = event.target.value;
+                        const workspaceTeams = nextClientId ? (teamsByWorkspace.get(nextClientId) ?? []) : [];
+                        const keepTeam = workspaceTeams.some(team => team.id === editForm.teamId)
+                          ? editForm.teamId
+                          : '';
+                        setEditForm({ ...editForm, clientId: nextClientId, teamId: keepTeam });
+                      }}
                     >
-                      <option value="">No team scope</option>
+                      <option value="">No workspace scope</option>
                       {clients.map(client => (
                         <option key={client.id} value={client.id}>
                           {client.companyName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Team</span>
+                    <select
+                      value={editForm.teamId}
+                      disabled={!editForm.clientId}
+                      onChange={event => setEditForm({ ...editForm, teamId: event.target.value })}
+                    >
+                      <option value="">No team scope</option>
+                      {(teamsByWorkspace.get(editForm.clientId) ?? []).map(team => (
+                        <option key={team.id} value={team.id}>
+                          {team.name}
                         </option>
                       ))}
                     </select>
@@ -371,7 +474,12 @@ export function OmegaStaff() {
                     />
                   </label>
                 </div>
-                {updateMutation.error && <div className="omega-inline-error">{(updateMutation.error as Error).message}</div>}
+                <p className="omega-helper-text">
+                  Password change is only forced once on the first login for a new account.
+                </p>
+                {updateMutation.error && (
+                  <div className="omega-inline-error">{(updateMutation.error as Error).message}</div>
+                )}
                 <div className="omega-modal-actions">
                   <button className="omega-primary-button" type="submit" disabled={updateMutation.isPending}>
                     {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
@@ -406,7 +514,10 @@ export function OmegaStaff() {
             <div className="omega-card-header">
               <div>
                 <h2>Add User</h2>
-                <p>Create a user from this popup and optionally attach the user to a team/client right away.</p>
+                <p>
+                  Create a user from this popup and optionally attach the user to a workspace and team right away. The
+                  user will be forced to change this password on first login only.
+                </p>
               </div>
             </div>
 
@@ -443,25 +554,32 @@ export function OmegaStaff() {
                 </label>
                 <label>
                   <span>Role</span>
-                    <select
-                      value={createForm.role}
-                      onChange={event => setCreateForm({ ...createForm, role: event.target.value as OmegaUser['role'] })}
-                    >
-                      {availableRoles.map(role => (
-                        <option key={role} value={role}>
-                          {formatRole(role)}
-                        </option>
-                      ))}
-                    </select>
+                  <select
+                    value={createForm.role}
+                    onChange={event => setCreateForm({ ...createForm, role: event.target.value as OmegaUser['role'] })}
+                  >
+                    {availableRoles.map(role => (
+                      <option key={role} value={role}>
+                        {formatRole(role)}
+                      </option>
+                    ))}
+                  </select>
                 </label>
                 <label>
-                  <span>Team / Client</span>
+                  <span>Workspace</span>
                   <select
                     value={createForm.clientId}
                     disabled={!canChooseClient}
-                    onChange={event => setCreateForm({ ...createForm, clientId: event.target.value })}
+                    onChange={event => {
+                      const nextClientId = event.target.value;
+                      const workspaceTeams = nextClientId ? (teamsByWorkspace.get(nextClientId) ?? []) : [];
+                      const keepTeam = workspaceTeams.some(team => team.id === createForm.teamId)
+                        ? createForm.teamId
+                        : '';
+                      setCreateForm({ ...createForm, clientId: nextClientId, teamId: keepTeam });
+                    }}
                   >
-                    <option value="">No team scope</option>
+                    <option value="">No workspace scope</option>
                     {clients.map(client => (
                       <option key={client.id} value={client.id}>
                         {client.companyName}
@@ -469,8 +587,25 @@ export function OmegaStaff() {
                     ))}
                   </select>
                 </label>
+                <label>
+                  <span>Team</span>
+                  <select
+                    value={createForm.teamId}
+                    disabled={!createForm.clientId}
+                    onChange={event => setCreateForm({ ...createForm, teamId: event.target.value })}
+                  >
+                    <option value="">No team scope</option>
+                    {(teamsByWorkspace.get(createForm.clientId) ?? []).map(team => (
+                      <option key={team.id} value={team.id}>
+                        {team.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
-              {createMutation.error && <div className="omega-inline-error">{(createMutation.error as Error).message}</div>}
+              {createMutation.error && (
+                <div className="omega-inline-error">{(createMutation.error as Error).message}</div>
+              )}
               <div className="omega-modal-actions">
                 <button className="omega-primary-button" type="submit" disabled={createMutation.isPending}>
                   {createMutation.isPending ? 'Creating...' : 'Create User'}

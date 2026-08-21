@@ -70,8 +70,8 @@ function getChatKey(chat: OmegaWorkspaceChat) {
 
 function formatRole(role: string) {
   const roleLabels: Record<string, string> = {
-    super_admin: 'Super Admin',
-    support_admin: 'Admin',
+    super_admin: 'Master Admin',
+    support_admin: 'Super Admin',
     client_admin: 'Sub Admin',
     client_agent: 'Employee',
   };
@@ -106,13 +106,7 @@ function formatMessageTime(value?: number | string) {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export function ClientApp({
-  standalone = true,
-  onLoggedOut,
-}: {
-  standalone?: boolean;
-  onLoggedOut?: () => void;
-}) {
+export function ClientApp({ standalone = true, onLoggedOut }: { standalone?: boolean; onLoggedOut?: () => void }) {
   const { t, i18n } = useTranslation();
   const branding = useBranding();
   const { theme, resolvedTheme, setTheme } = useTheme();
@@ -272,12 +266,32 @@ export function ClientApp({
   useEffect(() => {
     if (!user) return;
 
-    const interval = window.setInterval(() => {
-      void loadWorkspace(true);
-    }, 8000);
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const pollWorkspace = async () => {
+      let nextPollMs = 8000;
+      try {
+        const refreshedWorkspace = await loadWorkspace(true);
+        if (refreshedWorkspace.chats.length === 0) {
+          nextPollMs = 1500;
+        }
+      } catch {
+        // Keep the current inbox visible and retry on the normal interval.
+      }
+
+      if (!cancelled) {
+        timer = window.setTimeout(pollWorkspace, nextPollMs);
+      }
+    };
+
+    timer = window.setTimeout(pollWorkspace, 1500);
 
     return () => {
-      window.clearInterval(interval);
+      cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
     };
   }, [user, loadWorkspace]);
 
@@ -290,7 +304,7 @@ export function ClientApp({
     };
   }, [branding.tabTitle]);
 
-  const workspaceChats = workspace?.chats ?? [];
+  const workspaceChats = useMemo(() => workspace?.chats ?? [], [workspace?.chats]);
 
   const filteredChats = useMemo(() => {
     return workspaceChats
@@ -505,8 +519,7 @@ export function ClientApp({
       }
 
       const refreshedChat =
-        refreshedWorkspace.chats.find(chat => getChatKey(chat) === getChatKey(activeChat)) ??
-        activeChat;
+        refreshedWorkspace.chats.find(chat => getChatKey(chat) === getChatKey(activeChat)) ?? activeChat;
 
       await loadMessages(refreshedChat);
     } catch (refreshError) {
@@ -526,8 +539,7 @@ export function ClientApp({
   const languageLabel = languageOptions.find(option => option.value === currentLanguage)?.compactLabel ?? 'EN';
   const channelLabel =
     channelFilter === 'whatsapp' ? 'WhatsApp' : channelFilter === 'telegram' ? 'Telegram' : 'All channels';
-  const inboxStatusLabel =
-    inboxStatusFilter === 'all' ? 'All' : inboxStatusFilter === 'open' ? 'Open' : 'Closed';
+  const inboxStatusLabel = inboxStatusFilter === 'all' ? 'All' : inboxStatusFilter === 'open' ? 'Open' : 'Closed';
   const inboxSortLabel =
     inboxSort === 'latest'
       ? 'Latest'
@@ -540,7 +552,12 @@ export function ClientApp({
             : 'Waiting longest';
   const effectiveTheme = theme === 'system' ? resolvedTheme : theme;
   const ThemeIcon = theme === 'system' ? Monitor : effectiveTheme === 'dark' ? Moon : Sun;
-  const themeLabel = theme === 'system' ? t('theme.system', { defaultValue: 'System' }) : effectiveTheme === 'dark' ? t('theme.dark', { defaultValue: 'Dark' }) : t('theme.light', { defaultValue: 'Light' });
+  const themeLabel =
+    theme === 'system'
+      ? t('theme.system', { defaultValue: 'System' })
+      : effectiveTheme === 'dark'
+        ? t('theme.dark', { defaultValue: 'Dark' })
+        : t('theme.light', { defaultValue: 'Light' });
   const isOffDuty = !(user?.isOnDuty ?? true);
 
   const handleThemeToggle = () => {
@@ -635,11 +652,7 @@ export function ClientApp({
         </button>
 
         <div className="client-language-menu" ref={languageMenuRef}>
-          <button
-            className="client-rail-action"
-            type="button"
-            onClick={() => setIsLanguageMenuOpen(open => !open)}
-          >
+          <button className="client-rail-action" type="button" onClick={() => setIsLanguageMenuOpen(open => !open)}>
             <span>{languageLabel}</span>
             <span>{t('common.language', { defaultValue: 'Language' })}</span>
           </button>
@@ -670,7 +683,11 @@ export function ClientApp({
 
         <div className="client-rail-profile-area">
           <div className="client-profile-menu-wrap client-profile-menu-wrap-sidebar" ref={profileMenuRef}>
-            <button className="client-profile-trigger" type="button" onClick={() => setIsProfileMenuOpen(open => !open)}>
+            <button
+              className="client-profile-trigger"
+              type="button"
+              onClick={() => setIsProfileMenuOpen(open => !open)}
+            >
               <div className="client-profile-avatar">{getInitials(user.fullName)}</div>
               <div className="client-profile-trigger-copy">
                 <strong>{getInitials(user.fullName)}</strong>
@@ -685,9 +702,13 @@ export function ClientApp({
             {isProfileMenuOpen && (
               <div className="client-profile-menu client-profile-menu-sidebar">
                 <div className="client-duty-row">
-                  <span>{t('clientPortal.offDuty', { defaultValue: 'Off duty' })}</span>
+                  <span>
+                    {user.isOnDuty
+                      ? t('clientPortal.onDuty', { defaultValue: 'On duty' })
+                      : t('clientPortal.offDuty', { defaultValue: 'Off duty' })}
+                  </span>
                   <button
-                    className={`client-duty-toggle ${isOffDuty ? 'active' : ''}`}
+                    className={`client-duty-toggle ${user.isOnDuty ? 'active' : ''}`}
                     type="button"
                     onClick={() => void handleDutyToggle()}
                     disabled={isUpdatingDuty}
@@ -716,7 +737,6 @@ export function ClientApp({
             )}
           </div>
         </div>
-
       </aside>
 
       <aside className="client-queues">
@@ -781,136 +801,136 @@ export function ClientApp({
 
       <section className="client-inbox-listpane">
         <div className="client-inbox-controls-shell" ref={inboxControlsRef}>
-        <header className="client-inbox-heading">
-          <div className="client-inbox-heading-copy">
-            <strong>{t('clientPortal.yourInbox', { defaultValue: 'Your inbox' })}</strong>
-          </div>
-          <div className="client-inbox-control-menus">
+          <header className="client-inbox-heading">
+            <div className="client-inbox-heading-copy">
+              <strong>{t('clientPortal.yourInbox', { defaultValue: 'Your inbox' })}</strong>
+            </div>
+            <div className="client-inbox-control-menus">
+              <div className="client-inbox-menu-wrap">
+                <button
+                  className="client-inline-menu-trigger"
+                  type="button"
+                  onClick={() => {
+                    setIsChannelMenuOpen(open => !open);
+                    setIsSortMenuOpen(false);
+                    setIsStatusMenuOpen(false);
+                  }}
+                >
+                  <span>{channelLabel}</span>
+                  <ChevronDown size={14} />
+                </button>
+                {isChannelMenuOpen && (
+                  <div className="client-inline-menu-list client-inline-menu-list-compact">
+                    {[
+                      ['all', 'All channels'],
+                      ['whatsapp', 'WhatsApp'],
+                      ['telegram', 'Telegram'],
+                    ].map(([value, label]) => (
+                      <button
+                        key={value}
+                        className={`client-inline-menu-item ${channelFilter === value ? 'active' : ''}`}
+                        type="button"
+                        onClick={() => {
+                          setChannelFilter(value as ChannelFilter);
+                          setIsChannelMenuOpen(false);
+                        }}
+                      >
+                        <strong>{label}</strong>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </header>
+
+          <div className="client-inbox-filterbar">
             <div className="client-inbox-menu-wrap">
               <button
-                className="client-inline-menu-trigger"
+                className="client-inline-filter-trigger"
                 type="button"
                 onClick={() => {
-                  setIsChannelMenuOpen(open => !open);
+                  setIsStatusMenuOpen(open => !open);
                   setIsSortMenuOpen(false);
-                  setIsStatusMenuOpen(false);
+                  setIsChannelMenuOpen(false);
                 }}
               >
-                <span>{channelLabel}</span>
-                <ChevronDown size={14} />
+                <Filter size={15} />
+                <span>{inboxStatusLabel}</span>
               </button>
-              {isChannelMenuOpen && (
-                <div className="client-inline-menu-list client-inline-menu-list-compact">
+              {isStatusMenuOpen && (
+                <div className="client-inline-menu-list">
                   {[
-                    ['all', 'All channels'],
-                    ['whatsapp', 'WhatsApp'],
-                    ['telegram', 'Telegram'],
+                    ['all', 'All'],
+                    ['open', 'Open'],
+                    ['closed', 'Closed'],
                   ].map(([value, label]) => (
                     <button
                       key={value}
-                      className={`client-inline-menu-item ${channelFilter === value ? 'active' : ''}`}
+                      className={`client-inline-menu-item ${inboxStatusFilter === value ? 'active' : ''}`}
                       type="button"
                       onClick={() => {
-                        setChannelFilter(value as ChannelFilter);
-                        setIsChannelMenuOpen(false);
+                        setInboxStatusFilter(value as InboxStatusFilter);
+                        setIsStatusMenuOpen(false);
                       }}
                     >
-                      <strong>{label}</strong>
+                      <span>{label}</span>
                     </button>
                   ))}
                 </div>
               )}
             </div>
-          </div>
-        </header>
 
-        <div className="client-inbox-filterbar">
-          <div className="client-inbox-menu-wrap">
-            <button
-              className="client-inline-filter-trigger"
-              type="button"
-              onClick={() => {
-                setIsStatusMenuOpen(open => !open);
-                setIsSortMenuOpen(false);
-                setIsChannelMenuOpen(false);
-              }}
-            >
-              <Filter size={15} />
-              <span>{inboxStatusLabel}</span>
-            </button>
-            {isStatusMenuOpen && (
-              <div className="client-inline-menu-list">
-                {[
-                  ['all', 'All'],
-                  ['open', 'Open'],
-                  ['closed', 'Closed'],
-                ].map(([value, label]) => (
-                  <button
-                    key={value}
-                    className={`client-inline-menu-item ${inboxStatusFilter === value ? 'active' : ''}`}
-                    type="button"
-                    onClick={() => {
-                      setInboxStatusFilter(value as InboxStatusFilter);
-                      setIsStatusMenuOpen(false);
-                    }}
-                  >
-                    <span>{label}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+            <div className="client-inbox-menu-wrap">
+              <button
+                className="client-inline-filter-trigger"
+                type="button"
+                onClick={() => {
+                  setIsSortMenuOpen(open => !open);
+                  setIsStatusMenuOpen(false);
+                  setIsChannelMenuOpen(false);
+                }}
+              >
+                <ArrowUpDown size={15} />
+                <span>{inboxSortLabel}</span>
+              </button>
+              {isSortMenuOpen && (
+                <div className="client-inline-menu-list">
+                  <p className="client-inline-menu-title">Sort by</p>
+                  {[
+                    ['latest', 'Latest'],
+                    ['oldest', 'Oldest'],
+                    ['started_last', 'Started last'],
+                    ['started_first', 'Started first'],
+                    ['waiting_longest', 'Waiting longest'],
+                  ].map(([value, label]) => (
+                    <button
+                      key={value}
+                      className={`client-inline-menu-item ${inboxSort === value ? 'active' : ''}`}
+                      type="button"
+                      onClick={() => {
+                        setInboxSort(value as InboxSort);
+                        setIsSortMenuOpen(false);
+                      }}
+                    >
+                      <span>{label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
-          <div className="client-inbox-menu-wrap">
-            <button
-              className="client-inline-filter-trigger"
-              type="button"
-              onClick={() => {
-                setIsSortMenuOpen(open => !open);
-                setIsStatusMenuOpen(false);
-                setIsChannelMenuOpen(false);
-              }}
-            >
-              <ArrowUpDown size={15} />
-              <span>{inboxSortLabel}</span>
-            </button>
-            {isSortMenuOpen && (
-              <div className="client-inline-menu-list">
-                <p className="client-inline-menu-title">Sort by</p>
-                {[
-                  ['latest', 'Latest'],
-                  ['oldest', 'Oldest'],
-                  ['started_last', 'Started last'],
-                  ['started_first', 'Started first'],
-                  ['waiting_longest', 'Waiting longest'],
-                ].map(([value, label]) => (
-                  <button
-                    key={value}
-                    className={`client-inline-menu-item ${inboxSort === value ? 'active' : ''}`}
-                    type="button"
-                    onClick={() => {
-                      setInboxSort(value as InboxSort);
-                      setIsSortMenuOpen(false);
-                    }}
-                  >
-                    <span>{label}</span>
-                  </button>
-                ))}
-              </div>
-            )}
+            <div className="client-pane-actions">
+              <button
+                className="client-refresh-button"
+                type="button"
+                onClick={() => void handleInboxRefresh()}
+                disabled={isRefreshingWorkspace || loadingMessages}
+              >
+                <RefreshCcw size={16} />
+              </button>
+            </div>
           </div>
-
-          <div className="client-pane-actions">
-            <button
-              className="client-refresh-button"
-              type="button"
-              onClick={() => void handleInboxRefresh()}
-              disabled={isRefreshingWorkspace || loadingMessages}
-            >
-              <RefreshCcw size={16} />
-            </button>
-          </div>
-        </div>
         </div>
 
         <div className="client-searchbar">
@@ -934,7 +954,9 @@ export function ClientApp({
                 type="button"
                 onClick={() => setSelectedChatKey(getChatKey(chat))}
               >
-                <div className="client-chat-avatar">{chat.isGroup ? <Users size={16} /> : <MessageCircleMore size={16} />}</div>
+                <div className="client-chat-avatar">
+                  {chat.isGroup ? <Users size={16} /> : <MessageCircleMore size={16} />}
+                </div>
                 <div className="client-chat-copy">
                   <div className="client-chat-row-top">
                     <strong>{chat.name || chat.id}</strong>
@@ -994,7 +1016,9 @@ export function ClientApp({
                     key={message.waMessageId || message.id}
                     className={`client-message-bubble ${message.direction === 'outgoing' ? 'outgoing' : 'incoming'}`}
                   >
-                    <p>{message.body || (message.type === 'revoked' ? 'This message was deleted.' : `[${message.type}]`)}</p>
+                    <p>
+                      {message.body || (message.type === 'revoked' ? 'This message was deleted.' : `[${message.type}]`)}
+                    </p>
                     <div className="client-message-meta">
                       <span>{formatMessageTime(message.timestamp || message.createdAt)}</span>
                       {message.direction === 'outgoing' && <em>{message.status}</em>}
@@ -1006,7 +1030,8 @@ export function ClientApp({
                   <strong>{t('clientPortal.noMessagesYet', { defaultValue: 'No messages yet' })}</strong>
                   <p>
                     {t('clientPortal.noMessagesYetDesc', {
-                      defaultValue: 'This conversation is assigned, but there is no stored history to display right now.',
+                      defaultValue:
+                        'This conversation is assigned, but there is no stored history to display right now.',
                     })}
                   </p>
                 </div>
@@ -1014,11 +1039,11 @@ export function ClientApp({
             </div>
 
             <form className="client-composer" onSubmit={handleSend}>
-                <textarea
-                  value={messageInput}
-                  onChange={event => setMessageInput(event.target.value)}
-                  placeholder={
-                    isOffDuty
+              <textarea
+                value={messageInput}
+                onChange={event => setMessageInput(event.target.value)}
+                placeholder={
+                  isOffDuty
                     ? t('clientPortal.offDutyReplyPlaceholder', {
                         defaultValue: 'You are off duty. Turn it on to reply.',
                       })
@@ -1026,8 +1051,8 @@ export function ClientApp({
                 }
                 rows={3}
                 disabled={isOffDuty}
-                />
-                <button type="submit" disabled={isSending || !messageInput.trim() || isOffDuty}>
+              />
+              <button type="submit" disabled={isSending || !messageInput.trim() || isOffDuty}>
                 <SendHorizontal size={16} />
                 <span>
                   {isSending
@@ -1074,8 +1099,8 @@ export function ClientApp({
                 <strong>{formatRole(user.role)}</strong>
               </div>
               <div className="client-profile-field">
-                <span>{t('clientPortal.workspace', { defaultValue: 'Workspace' })}</span>
-                <strong>{activeWorkspaceName}</strong>
+                <span>{t('clientPortal.team', { defaultValue: 'Team' })}</span>
+                <strong>{user.teamName ?? t('common.unassigned', { defaultValue: 'Unassigned' })}</strong>
               </div>
               <label className="client-profile-field client-profile-field-editable">
                 <span>{t('common.password', { defaultValue: 'Password' })}</span>
@@ -1097,7 +1122,9 @@ export function ClientApp({
               {profileError && <div className="client-login-error">{profileError}</div>}
               <div className="client-profile-modal-actions">
                 <button type="submit" className="client-login-button" disabled={isSavingProfile}>
-                  {isSavingProfile ? t('common.save', { defaultValue: 'Saving...' }) : t('common.save', { defaultValue: 'Save' })}
+                  {isSavingProfile
+                    ? t('common.save', { defaultValue: 'Saving...' })
+                    : t('common.save', { defaultValue: 'Save' })}
                 </button>
               </div>
             </form>

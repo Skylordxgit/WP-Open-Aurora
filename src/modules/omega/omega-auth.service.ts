@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, Injectable, OnModuleInit, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'crypto';
@@ -16,17 +16,17 @@ export class OmegaAuthService implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    const email = this.configService.get<string>('omega.defaultAdminEmail', 'admin@aurorawa.local');
-    const password = this.configService.get<string>('omega.defaultAdminPassword', 'ChangeMe123!');
-    const supportEmail = this.configService.get<string>('omega.defaultSupportEmail', 'support@aurorawa.local');
+    const email = this.configService.get<string>('omega.defaultAdminEmail', 'masteradmin@auroramy.com');
+    const password = this.configService.get<string>('omega.defaultAdminPassword', 'Abcd1234');
+    const supportEmail = this.configService.get<string>('omega.defaultSupportEmail', 'superadmin@auroramy.com');
     await this.ensureDefaultUser({
-      fullName: 'Aurora Super Admin',
+      fullName: 'Master Admin',
       email,
       password,
       role: OmegaUserRole.SUPER_ADMIN,
     });
     await this.ensureDefaultUser({
-      fullName: 'Aurora Support',
+      fullName: 'Super Admin',
       email: supportEmail,
       password,
       role: OmegaUserRole.SUPPORT_ADMIN,
@@ -94,12 +94,31 @@ export class OmegaAuthService implements OnModuleInit {
     }
     if (updates.password) {
       user.passwordHash = this.hashPassword(updates.password);
+      user.mustChangePassword = false;
     }
     if (updates.isOnDuty !== undefined) {
       user.isOnDuty = updates.isOnDuty;
     }
     await this.userRepository.save(user);
     return user;
+  }
+
+  assertPasswordChangeSatisfied(user: OmegaUser, requestPath: string, method: string): void {
+    if (!user.mustChangePassword) {
+      return;
+    }
+
+    const normalizedPath = requestPath.split('?')[0].replace(/^\/api/, '');
+    const normalizedMethod = method.toUpperCase();
+    const canUpdateOwnProfile = normalizedPath === '/omega/auth/me' && normalizedMethod === 'PATCH';
+    const canViewOwnProfile = normalizedPath === '/omega/auth/me' && normalizedMethod === 'GET';
+    const canLogout = normalizedPath === '/omega/auth/logout' && normalizedMethod === 'POST';
+
+    if (canUpdateOwnProfile || canViewOwnProfile || canLogout) {
+      return;
+    }
+
+    throw new ForbiddenException('Password change is required before accessing Aurora');
   }
 
   private sessionTtlHours(): number {
@@ -141,6 +160,10 @@ export class OmegaAuthService implements OnModuleInit {
     const normalizedEmail = email.toLowerCase();
     const existing = await this.userRepository.findOne({ where: { email: normalizedEmail } });
     if (existing) {
+      if (existing.mustChangePassword !== true && this.verifyPassword(password, existing.passwordHash)) {
+        existing.mustChangePassword = true;
+        await this.userRepository.save(existing);
+      }
       return;
     }
 
@@ -152,6 +175,7 @@ export class OmegaAuthService implements OnModuleInit {
         role,
         status: OmegaUserStatus.ACTIVE,
         isOnDuty: true,
+        mustChangePassword: true,
       }),
     );
   }

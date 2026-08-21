@@ -43,6 +43,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
   private readonly logger = createLogger('SessionService');
   private static readonly CHAT_FETCH_TIMEOUT_MS = 15_000;
   private static readonly CHAT_FALLBACK_MESSAGE_SCAN = 5000;
+  private static readonly CHAT_CACHE_TTL_MS = 5_000;
 
   // In-memory map of active engine instances
   private engines: Map<string, IWhatsAppEngine> = new Map();
@@ -51,6 +52,8 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
   // reduces engine rate-limit pressure). Best-effort feature, so staleness is acceptable.
   private readonly lidPhoneCache = new Map<string, string | null>();
   private static readonly LID_PHONE_CACHE_MAX = 5000;
+  private readonly chatCache = new Map<string, { chats: ChatSummary[]; expiresAt: number }>();
+  private readonly chatRefreshes = new Map<string, Promise<ChatSummary[]>>();
   // Transient, human-readable reason for the most recent terminal engine failure,
   // keyed by session id. Surfaced on read so the dashboard can explain a FAILED
   // status; cleared when the session re-initializes or becomes ready.
@@ -968,6 +971,40 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       throw new BadRequestException('Session is not started');
     }
 
+    return this.refreshChats(id, engine);
+  }
+
+  /**
+   * Returns the inbox from persisted messages/cache without blocking the request on a full
+   * WhatsApp Web chat scan. A single background refresh keeps the next poll current.
+   */
+  async getChatsFast(id: string): Promise<ChatSummary[]> {
+    await this.findOne(id);
+    const engine = this.engines.get(id);
+    const storedChats = await this.getChatsFromStoredMessages(id);
+    const cached = this.chatCache.get(id);
+
+    if (engine && (!cached || cached.expiresAt <= Date.now())) {
+      void this.refreshChats(id, engine).catch(() => undefined);
+    }
+
+    return this.mergeChats(cached?.chats ?? [], storedChats);
+  }
+
+  private async refreshChats(id: string, engine: IWhatsAppEngine): Promise<ChatSummary[]> {
+    const existingRefresh = this.chatRefreshes.get(id);
+    if (existingRefresh) {
+      return existingRefresh;
+    }
+
+    const refresh = this.fetchAndCacheChats(id, engine).finally(() => {
+      this.chatRefreshes.delete(id);
+    });
+    this.chatRefreshes.set(id, refresh);
+    return refresh;
+  }
+
+  private async fetchAndCacheChats(id: string, engine: IWhatsAppEngine): Promise<ChatSummary[]> {
     let chatFetchTimer: NodeJS.Timeout | undefined;
     try {
       const liveChats = await Promise.race([
@@ -980,35 +1017,43 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         }),
       ]);
       const storedChats = await this.getChatsFromStoredMessages(id);
-      const merged = new Map(liveChats.map(chat => [chat.id, chat]));
-
-      for (const storedChat of storedChats) {
-        const liveChat = merged.get(storedChat.id);
-        if (!liveChat) {
-          merged.set(storedChat.id, storedChat);
-          continue;
-        }
-
-        if ((storedChat.timestamp || 0) > (liveChat.timestamp || 0)) {
-          merged.set(storedChat.id, {
-            ...liveChat,
-            timestamp: storedChat.timestamp,
-            lastMessage: storedChat.lastMessage || liveChat.lastMessage,
-          });
-        }
-      }
-
-      return [...merged.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      const chats = this.mergeChats(liveChats, storedChats);
+      this.chatCache.set(id, { chats, expiresAt: Date.now() + SessionService.CHAT_CACHE_TTL_MS });
+      return chats;
     } catch (error) {
       this.logger.warn(`Live chat fetch failed for session ${id}; falling back to stored messages`, {
         sessionId: id,
         reason: error instanceof Error ? error.message : String(error),
         action: 'get_chats_fallback',
       });
-      return this.getChatsFromStoredMessages(id);
+      const chats = await this.getChatsFromStoredMessages(id);
+      this.chatCache.set(id, { chats, expiresAt: Date.now() + SessionService.CHAT_CACHE_TTL_MS });
+      return chats;
     } finally {
       if (chatFetchTimer) clearTimeout(chatFetchTimer);
     }
+  }
+
+  private mergeChats(primary: ChatSummary[], stored: ChatSummary[]): ChatSummary[] {
+    const merged = new Map(primary.map(chat => [chat.id, chat]));
+
+    for (const storedChat of stored) {
+      const liveChat = merged.get(storedChat.id);
+      if (!liveChat) {
+        merged.set(storedChat.id, storedChat);
+        continue;
+      }
+
+      if ((storedChat.timestamp || 0) > (liveChat.timestamp || 0)) {
+        merged.set(storedChat.id, {
+          ...liveChat,
+          timestamp: storedChat.timestamp,
+          lastMessage: storedChat.lastMessage || liveChat.lastMessage,
+        });
+      }
+    }
+
+    return [...merged.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   }
 
   private async getChatsFromStoredMessages(sessionId: string): Promise<ChatSummary[]> {

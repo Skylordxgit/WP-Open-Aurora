@@ -19,6 +19,9 @@ export class OmegaUser {
   @Column({ type: 'varchar', length: 36, nullable: true })
   clientId: string | null;
 
+  @Column({ type: 'varchar', length: 36, nullable: true })
+  teamId: string | null;
+
   @Column({ type: 'varchar', length: 30, default: OmegaUserRole.CLIENT_AGENT })
   role: OmegaUserRole;
 
@@ -27,6 +30,9 @@ export class OmegaUser {
 
   @Column({ type: 'boolean', default: true })
   isOnDuty: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  mustChangePassword: boolean;
 
   @Column({ type: 'datetime', nullable: true })
   lastLoginAt: Date | null;

@@ -81,7 +81,8 @@ class BulkMessageOptionsDto {
   stopOnError?: boolean;
 
   @ApiPropertyOptional({
-    description: 'Specific session IDs that should be used as senders for this batch. Defaults to the route session only.',
+    description:
+      'Specific session IDs that should be used as senders for this batch. Defaults to the route session only.',
     type: [String],
   })
   @IsOptional()
@@ -92,7 +93,8 @@ class BulkMessageOptionsDto {
   sourceSessionIds?: string[];
 
   @ApiPropertyOptional({
-    description: 'Rotate to the next sender after this many messages. Only applies when multiple sender sessions are selected.',
+    description:
+      'Rotate to the next sender after this many messages. Only applies when multiple sender sessions are selected.',
     default: 5,
   })
   @IsOptional()
@@ -101,7 +103,10 @@ class BulkMessageOptionsDto {
   @Max(100)
   rotateAfterCount?: number;
 
-  @ApiPropertyOptional({ description: 'Shuffle the selected sender order before batch processing starts.', default: false })
+  @ApiPropertyOptional({
+    description: 'Shuffle the selected sender order before batch processing starts.',
+    default: false,
+  })
   @IsOptional()
   @IsBoolean()
   shuffleSenders?: boolean;

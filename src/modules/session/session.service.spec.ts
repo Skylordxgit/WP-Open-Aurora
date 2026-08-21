@@ -9,7 +9,7 @@ import { EngineFactory } from '../../engine/engine.factory';
 import { EventsGateway } from '../events/events.gateway';
 import { WebhookService } from '../webhook/webhook.service';
 import { HookManager } from '../../core/hooks';
-import { IncomingMessage, EngineEventCallbacks } from '../../engine/interfaces/whatsapp-engine.interface';
+import { ChatSummary, IncomingMessage, EngineEventCallbacks } from '../../engine/interfaces/whatsapp-engine.interface';
 
 function createMockSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -871,6 +871,43 @@ describe('SessionService', () => {
           lastMessage: 'Stored only',
         },
       ]);
+    });
+
+    it('returns stored chats without waiting for the live WhatsApp chat scan', async () => {
+      const session = createMockSession();
+      (repository.findOne as jest.Mock).mockResolvedValue(session);
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+      await service.start('sess-uuid-1');
+
+      let finishLiveScan!: (chats: ChatSummary[]) => void;
+      mockEngine.getChats.mockReturnValue(
+        new Promise(resolve => {
+          finishLiveScan = resolve;
+        }),
+      );
+      (messageRepository.find as jest.Mock).mockResolvedValue([
+        {
+          sessionId: 'sess-uuid-1',
+          chatId: '222@c.us',
+          body: 'Stored immediately',
+          timestamp: 100,
+          createdAt: new Date('2026-08-20T08:00:00Z'),
+        },
+      ]);
+
+      await expect(service.getChatsFast('sess-uuid-1')).resolves.toEqual([
+        {
+          id: '222@c.us',
+          name: '222@c.us',
+          isGroup: false,
+          unreadCount: 0,
+          timestamp: 100,
+          lastMessage: 'Stored immediately',
+        },
+      ]);
+
+      finishLiveScan([]);
+      await new Promise(resolve => setImmediate(resolve));
     });
 
     it('should fall back to stored messages when engine.getChats hangs or fails', async () => {

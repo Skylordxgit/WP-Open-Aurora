@@ -1,7 +1,8 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Between, Repository } from 'typeorm';
+import { Message as StoredMessage, MessageDirection } from '../message/entities/message.entity';
 import { MessageService } from '../message/message.service';
 import { SessionService } from '../session/session.service';
 import {
@@ -11,6 +12,10 @@ import {
   OmegaCampaignStatus,
   OmegaClient,
   OmegaClientStatus,
+  OmegaConversation,
+  OmegaConversationEvent,
+  OmegaConversationEventType,
+  OmegaConversationStatus,
   OmegaContact,
   OmegaContactGroup,
   OmegaMessage,
@@ -19,6 +24,7 @@ import {
   OmegaPlan,
   OmegaSessionStatus,
   OmegaSubscription,
+  OmegaTeam,
   OmegaSubscriptionStatus,
   OmegaUsageLog,
   OmegaUsageMetricType,
@@ -31,9 +37,11 @@ import {
   AssignOmegaSessionDto,
   CreateOmegaClientDto,
   CreateOmegaPlanDto,
+  CreateOmegaTeamDto,
   CreateOmegaUserDto,
   UpdateOmegaClientDto,
   UpdateOmegaPlanDto,
+  UpdateOmegaTeamDto,
   UpdateOmegaUserDto,
 } from './dto';
 import { OmegaAuthService } from './omega-auth.service';
@@ -53,6 +61,8 @@ export class OmegaAdminService implements OnModuleInit {
     private readonly clientRepository: Repository<OmegaClient>,
     @InjectRepository(OmegaPlan, 'main')
     private readonly planRepository: Repository<OmegaPlan>,
+    @InjectRepository(OmegaTeam, 'main')
+    private readonly teamRepository: Repository<OmegaTeam>,
     @InjectRepository(OmegaWhatsappSession, 'main')
     private readonly sessionRepository: Repository<OmegaWhatsappSession>,
     @InjectRepository(OmegaUsageLog, 'main')
@@ -73,6 +83,12 @@ export class OmegaAdminService implements OnModuleInit {
     private readonly messageRepository: Repository<OmegaMessage>,
     @InjectRepository(OmegaAuthSession, 'main')
     private readonly authSessionRepository: Repository<OmegaAuthSession>,
+    @InjectRepository(OmegaConversation, 'main')
+    private readonly conversationRepository: Repository<OmegaConversation>,
+    @InjectRepository(OmegaConversationEvent, 'main')
+    private readonly conversationEventRepository: Repository<OmegaConversationEvent>,
+    @InjectRepository(StoredMessage, 'data')
+    private readonly storedMessageRepository: Repository<StoredMessage>,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -146,6 +162,111 @@ export class OmegaAdminService implements OnModuleInit {
     };
   }
 
+  async getEmployeeAnalytics(
+    actor: OmegaUser,
+    filters: { preset?: string; startDate?: string; endDate?: string } = {},
+  ) {
+    const range = this.resolveAnalyticsRange(filters.preset, filters.startDate, filters.endDate);
+    const [users, clients, sessions, conversations, events] = await Promise.all([
+      this.userRepository.find({ order: { createdAt: 'DESC' } }),
+      this.clientRepository.find(),
+      this.listSessionEntities(),
+      this.conversationRepository.find(),
+      this.conversationEventRepository.find({
+        where: {
+          createdAt: Between(range.start, range.end),
+        },
+        order: { createdAt: 'ASC' },
+      }),
+    ]);
+
+    const scopedClients = this.scopeClientsForActor(clients, actor);
+    const scopedClientIds = new Set(scopedClients.map(client => client.id));
+    const scopedSessions = this.scopeSessionsForActor(sessions, actor, scopedClientIds);
+    const scopedSessionIds = new Set(scopedSessions.map(session => session.id));
+    const scopedUsers = this.scopeUsersForActor(users, actor).filter(
+      user =>
+        !!user.clientId &&
+        scopedClientIds.has(user.clientId) &&
+        [OmegaUserRole.CLIENT_ADMIN, OmegaUserRole.CLIENT_AGENT].includes(user.role),
+    );
+    const scopedUserIds = new Set(scopedUsers.map(user => user.id));
+    const clientsById = new Map(scopedClients.map(client => [client.id, client.companyName]));
+    const scopedConversations = conversations.filter(
+      conversation =>
+        scopedClientIds.has(conversation.clientId) && scopedSessionIds.has(conversation.workspaceSessionId),
+    );
+    const scopedConversationIds = new Set(scopedConversations.map(conversation => conversation.id));
+    const scopedEvents = events.filter(
+      event =>
+        scopedConversationIds.has(event.conversationId) &&
+        (!event.userId || scopedUserIds.has(event.userId)) &&
+        scopedClientIds.has(event.clientId),
+    );
+
+    const employees = scopedUsers
+      .map(user => {
+        const userEvents = scopedEvents.filter(event => event.userId === user.id);
+        const assignedEvents = userEvents.filter(event => event.eventType === OmegaConversationEventType.ASSIGNED);
+        const firstResponseEvents = userEvents.filter(
+          event => event.eventType === OmegaConversationEventType.FIRST_RESPONSE,
+        );
+        const replyEvents = userEvents.filter(event => event.eventType === OmegaConversationEventType.REPLIED);
+        const closedEvents = userEvents.filter(event => event.eventType === OmegaConversationEventType.CLOSED);
+        const handledConversationIds = new Set(userEvents.map(event => event.conversationId));
+        const activeConversationCount = scopedConversations.filter(
+          conversation =>
+            conversation.assignedUserId === user.id &&
+            conversation.status === OmegaConversationStatus.OPEN &&
+            (!conversation.closedAt || conversation.closedAt >= range.start),
+        ).length;
+
+        return {
+          userId: user.id,
+          fullName: user.fullName,
+          email: user.email,
+          role: user.role,
+          companyName: user.clientId ? (clientsById.get(user.clientId) ?? null) : null,
+          handledChats: handledConversationIds.size,
+          assignedChats: assignedEvents.length,
+          closedChats: closedEvents.length,
+          activeChats: activeConversationCount,
+          firstResponseAvgMs: this.averageResponseMs(firstResponseEvents),
+          avgResponseMs: this.averageResponseMs([...firstResponseEvents, ...replyEvents]),
+          repliesCount: replyEvents.length + firstResponseEvents.length,
+        };
+      })
+      .sort((left, right) => right.handledChats - left.handledChats || left.fullName.localeCompare(right.fullName));
+
+    return {
+      range: {
+        preset: range.preset,
+        startDate: this.toIsoDate(range.start),
+        endDate: this.toIsoDate(range.end),
+      },
+      summary: {
+        activeEmployees: employees.filter(
+          employee =>
+            employee.handledChats > 0 ||
+            employee.assignedChats > 0 ||
+            employee.closedChats > 0 ||
+            employee.activeChats > 0,
+        ).length,
+        handledChats: employees.reduce((sum, employee) => sum + employee.handledChats, 0),
+        assignedChats: employees.reduce((sum, employee) => sum + employee.assignedChats, 0),
+        closedChats: employees.reduce((sum, employee) => sum + employee.closedChats, 0),
+        activeChats: employees.reduce((sum, employee) => sum + employee.activeChats, 0),
+        firstResponseAvgMs: this.averageFromNumbers(
+          employees.map(employee => employee.firstResponseAvgMs).filter((value): value is number => value !== null),
+        ),
+        avgResponseMs: this.averageFromNumbers(
+          employees.map(employee => employee.avgResponseMs).filter((value): value is number => value !== null),
+        ),
+      },
+      employees,
+    };
+  }
+
   async listClients(actor?: OmegaUser) {
     const [clients, plans, sessions, subscriptions, users] = await Promise.all([
       this.clientRepository.find({ order: { createdAt: 'DESC' } }),
@@ -208,6 +329,23 @@ export class OmegaAdminService implements OnModuleInit {
     };
   }
 
+  async listTeams(actor?: OmegaUser) {
+    const [teams, clients] = await Promise.all([
+      this.teamRepository.find({ order: { createdAt: 'DESC' } }),
+      this.clientRepository.find(),
+    ]);
+    const scopedClients = this.scopeClientsForActor(clients, actor);
+    const scopedClientIds = new Set(scopedClients.map(client => client.id));
+    const clientsById = new Map(scopedClients.map(client => [client.id, client.companyName]));
+
+    return teams
+      .filter(team => scopedClientIds.has(team.clientId))
+      .map(team => ({
+        ...team,
+        workspaceName: clientsById.get(team.clientId) ?? null,
+      }));
+  }
+
   async createClient(dto: CreateOmegaClientDto) {
     if (dto.planId) {
       await this.ensurePlanExists(dto.planId);
@@ -250,6 +388,56 @@ export class OmegaAdminService implements OnModuleInit {
     await this.clientRepository.save(client);
     await this.upsertSubscription(client.id, client.planId, client.monthlyMessageLimit, client.whatsappAccountLimit);
     return this.getClientById(client.id);
+  }
+
+  async createTeam(dto: CreateOmegaTeamDto, actor: OmegaUser) {
+    const targetClientId = actor.role === OmegaUserRole.CLIENT_ADMIN ? actor.clientId : dto.clientId;
+    if (!targetClientId) {
+      throw new BadRequestException('workspace is required');
+    }
+    const client = await this.getClientEntity(targetClientId, actor);
+
+    const team = this.teamRepository.create({
+      clientId: client.id,
+      name: dto.name.trim(),
+      description: dto.description?.trim() || null,
+      status: dto.status ?? 'active',
+    });
+
+    return this.teamRepository.save(team);
+  }
+
+  async updateTeam(id: string, dto: UpdateOmegaTeamDto, actor: OmegaUser) {
+    const team = await this.teamRepository.findOne({ where: { id } });
+    if (!team) {
+      throw new NotFoundException('Team not found');
+    }
+
+    const currentClient = await this.getClientEntity(team.clientId, actor);
+    const nextClient =
+      dto.clientId && dto.clientId !== team.clientId ? await this.getClientEntity(dto.clientId, actor) : currentClient;
+
+    team.clientId = nextClient.id;
+    team.name = dto.name?.trim() || team.name;
+    team.description = dto.description !== undefined ? dto.description.trim() || null : team.description;
+    team.status = dto.status ?? team.status;
+
+    await this.teamRepository.save(team);
+
+    const impactedUsers = await this.userRepository.find({ where: { teamId: team.id } });
+    if (impactedUsers.some(user => user.clientId !== team.clientId)) {
+      await this.userRepository.save(
+        impactedUsers.map(user => ({
+          ...user,
+          clientId: team.clientId,
+        })),
+      );
+    }
+
+    return {
+      ...team,
+      workspaceName: nextClient.companyName,
+    };
   }
 
   async listPlans() {
@@ -371,16 +559,20 @@ export class OmegaAdminService implements OnModuleInit {
   }
 
   async listUsers(actor?: OmegaUser) {
-    const [users, clients] = await Promise.all([
+    const [users, clients, teams] = await Promise.all([
       this.userRepository.find({ order: { createdAt: 'DESC' } }),
       this.clientRepository.find(),
+      this.teamRepository.find(),
     ]);
     const clientsById = new Map(clients.map(client => [client.id, client.companyName]));
+    const teamsById = new Map(teams.map(team => [team.id, team]));
 
     const scopedUsers = this.scopeUsersForActor(users, actor);
     return scopedUsers.map(user => ({
       ...user,
       companyName: user.clientId ? (clientsById.get(user.clientId) ?? null) : null,
+      workspaceName: user.clientId ? (clientsById.get(user.clientId) ?? null) : null,
+      teamName: user.teamId ? (teamsById.get(user.teamId)?.name ?? null) : null,
       isOnDuty: user.isOnDuty,
     }));
   }
@@ -392,6 +584,7 @@ export class OmegaAdminService implements OnModuleInit {
     if (resolvedClientId) {
       await this.getClientEntity(resolvedClientId, actor);
     }
+    const resolvedTeamId = await this.resolveTeamAssignment(dto.teamId, resolvedClientId, actor);
 
     return this.userRepository.save(
       this.userRepository.create({
@@ -401,7 +594,9 @@ export class OmegaAdminService implements OnModuleInit {
         role: dto.role,
         status: OmegaUserStatus.ACTIVE,
         clientId: resolvedClientId,
+        teamId: resolvedTeamId,
         isOnDuty: dto.isOnDuty ?? true,
+        mustChangePassword: true,
       }),
     );
   }
@@ -427,6 +622,11 @@ export class OmegaAdminService implements OnModuleInit {
     if (resolvedClientId) {
       await this.getClientEntity(resolvedClientId, actor);
     }
+    const resolvedTeamId = await this.resolveTeamAssignment(
+      dto.teamId !== undefined ? dto.teamId : user.teamId,
+      resolvedClientId,
+      actor,
+    );
 
     Object.assign(user, {
       fullName: dto.fullName ?? user.fullName,
@@ -434,6 +634,7 @@ export class OmegaAdminService implements OnModuleInit {
       role: dto.role ?? user.role,
       status: dto.status ?? user.status,
       clientId: resolvedClientId ?? null,
+      teamId: resolvedTeamId,
       isOnDuty: dto.isOnDuty ?? user.isOnDuty,
     });
     if (dto.password) {
@@ -451,6 +652,15 @@ export class OmegaAdminService implements OnModuleInit {
 
     const client = await this.clientRepository.findOne({ where: { id: clientId } });
     return client?.companyName ?? null;
+  }
+
+  async getTeamName(teamId?: string | null) {
+    if (!teamId) {
+      return null;
+    }
+
+    const team = await this.teamRepository.findOne({ where: { id: teamId } });
+    return team?.name ?? null;
   }
 
   async getWorkspaceForUser(user: OmegaUser) {
@@ -473,12 +683,23 @@ export class OmegaAdminService implements OnModuleInit {
     const chatBuckets = await Promise.all(
       sessions.map(async session => {
         try {
-          const chats = await this.sessionService.getChats(session.openwaSessionId);
+          const chats = await this.sessionService.getChatsFast(session.openwaSessionId);
+          await Promise.all(
+            chats.map(chat =>
+              this.syncConversationSnapshot(session, {
+                chatId: chat.id,
+                chatName: chat.name ?? null,
+                isGroup: Boolean(chat.isGroup),
+                timestamp: chat.timestamp,
+              }),
+            ),
+          );
           return chats.map(chat => ({
             ...chat,
             sessionId: session.id,
             sessionName: session.openwaSessionName ?? session.openwaSessionId,
             phoneNumber: session.phoneNumber ?? null,
+            status: OmegaConversationStatus.OPEN,
           }));
         } catch {
           return [];
@@ -505,7 +726,10 @@ export class OmegaAdminService implements OnModuleInit {
 
   async getWorkspaceMessages(user: OmegaUser, workspaceSessionId: string, chatId: string, limit = 100) {
     const session = await this.getWorkspaceSessionForUser(user, workspaceSessionId);
-    return this.messageService.getMessages(session.openwaSessionId, { chatId, limit });
+    await this.syncConversationSnapshot(session, { chatId });
+    const payload = await this.messageService.getMessages(session.openwaSessionId, { chatId, limit });
+    await this.syncConversationTimelineFromMessages(session, chatId);
+    return payload;
   }
 
   async markWorkspaceChatRead(user: OmegaUser, workspaceSessionId: string, chatId: string) {
@@ -515,6 +739,59 @@ export class OmegaAdminService implements OnModuleInit {
 
   async sendWorkspaceText(user: OmegaUser, workspaceSessionId: string, chatId: string, text: string) {
     const session = await this.getWorkspaceSessionForUser(user, workspaceSessionId);
+    const conversation = await this.syncConversationSnapshot(session, { chatId });
+    const hydratedConversation = await this.syncConversationTimelineFromMessages(session, chatId, conversation);
+    const now = new Date();
+    let changedConversation = hydratedConversation;
+
+    if (changedConversation.assignedUserId !== user.id) {
+      changedConversation = await this.conversationRepository.save({
+        ...changedConversation,
+        assignedUserId: user.id,
+        assignedAt: now,
+      });
+      await this.recordConversationEvent(changedConversation, OmegaConversationEventType.ASSIGNED, user.id);
+    }
+
+    const hasFirstInbound = !!changedConversation.firstInboundAt;
+    const hasFirstResponse = !!changedConversation.firstResponseAt;
+    const shouldTrackFirstResponse = hasFirstInbound && !hasFirstResponse && !!changedConversation.firstInboundAt;
+    if (shouldTrackFirstResponse && changedConversation.firstInboundAt) {
+      const responseMs = Math.max(0, now.getTime() - changedConversation.firstInboundAt.getTime());
+      changedConversation = await this.conversationRepository.save({
+        ...changedConversation,
+        firstResponseAt: now,
+      });
+      await this.recordConversationEvent(
+        changedConversation,
+        OmegaConversationEventType.FIRST_RESPONSE,
+        user.id,
+        responseMs,
+      );
+    } else if (
+      changedConversation.lastInboundAt &&
+      (!changedConversation.lastOutboundAt ||
+        changedConversation.lastInboundAt.getTime() > changedConversation.lastOutboundAt.getTime())
+    ) {
+      const responseMs = Math.max(0, now.getTime() - changedConversation.lastInboundAt.getTime());
+      await this.recordConversationEvent(changedConversation, OmegaConversationEventType.REPLIED, user.id, responseMs);
+    }
+
+    if (changedConversation.status === OmegaConversationStatus.CLOSED) {
+      changedConversation = await this.conversationRepository.save({
+        ...changedConversation,
+        status: OmegaConversationStatus.OPEN,
+        closedAt: null,
+      });
+      await this.recordConversationEvent(changedConversation, OmegaConversationEventType.REOPENED, user.id);
+    }
+
+    await this.conversationRepository.save({
+      ...changedConversation,
+      lastOutboundAt: now,
+      lastActivityAt: now,
+    });
+
     return this.messageService.sendText(session.openwaSessionId, { chatId, text });
   }
 
@@ -583,8 +860,8 @@ export class OmegaAdminService implements OnModuleInit {
         authSessionTtlHours: this.configService.get<number>('omega.authSessionTtlHours', 12),
       },
       defaultAccounts: {
-        superAdminEmail: this.configService.get<string>('omega.defaultAdminEmail', 'admin@aurorawa.local'),
-        supportAdminEmail: this.configService.get<string>('omega.defaultSupportEmail', 'support@aurorawa.local'),
+        superAdminEmail: this.configService.get<string>('omega.defaultAdminEmail', 'masteradmin@auroramy.com'),
+        supportAdminEmail: this.configService.get<string>('omega.defaultSupportEmail', 'superadmin@auroramy.com'),
       },
     };
   }
@@ -737,30 +1014,62 @@ export class OmegaAdminService implements OnModuleInit {
 
     await this.userRepository.save([
       this.userRepository.create({
-        fullName: 'Northstar Admin',
-        email: 'admin@northstar-health.example',
-        passwordHash: this.omegaAuthService.hashPassword('ChangeMe123!'),
+        fullName: 'Admin',
+        email: 'admin@auroramy.com',
+        passwordHash: this.omegaAuthService.hashPassword('Abcd1234'),
+        role: OmegaUserRole.SUPPORT_ADMIN,
+        status: OmegaUserStatus.ACTIVE,
+        clientId: null,
+        teamId: null,
+        mustChangePassword: false,
+      }),
+      this.userRepository.create({
+        fullName: 'Subadmin',
+        email: 'subadmin@auroramy.com',
+        passwordHash: this.omegaAuthService.hashPassword('Abcd1234'),
         role: OmegaUserRole.CLIENT_ADMIN,
         status: OmegaUserStatus.ACTIVE,
         clientId: firstClient.id,
+        teamId: null,
+        mustChangePassword: false,
       }),
       this.userRepository.create({
-        fullName: 'Northstar Agent',
-        email: 'agent@northstar-health.example',
-        passwordHash: this.omegaAuthService.hashPassword('ChangeMe123!'),
+        fullName: 'Employee',
+        email: 'employee@auroramy.com',
+        passwordHash: this.omegaAuthService.hashPassword('Abcd1234'),
         role: OmegaUserRole.CLIENT_AGENT,
         status: OmegaUserStatus.ACTIVE,
         clientId: firstClient.id,
-      }),
-      this.userRepository.create({
-        fullName: 'BluePeak Admin',
-        email: 'admin@bluepeak-realty.example',
-        passwordHash: this.omegaAuthService.hashPassword('ChangeMe123!'),
-        role: OmegaUserRole.CLIENT_ADMIN,
-        status: OmegaUserStatus.INACTIVE,
-        clientId: secondClient.id,
+        teamId: null,
+        mustChangePassword: false,
       }),
     ]);
+
+    const [northstarTeam] = await this.teamRepository.save([
+      this.teamRepository.create({
+        clientId: firstClient.id,
+        name: 'Northstar Operations',
+        description: 'Default Northstar team',
+        status: 'active',
+      }),
+      this.teamRepository.create({
+        clientId: secondClient.id,
+        name: 'BluePeak Sales',
+        description: 'Default BluePeak team',
+        status: 'active',
+      }),
+    ]);
+
+    const defaultSubadmin = await this.userRepository.findOne({ where: { email: 'subadmin@auroramy.com' } });
+    const defaultEmployee = await this.userRepository.findOne({ where: { email: 'employee@auroramy.com' } });
+    if (defaultSubadmin) {
+      defaultSubadmin.teamId = northstarTeam.id;
+      await this.userRepository.save(defaultSubadmin);
+    }
+    if (defaultEmployee) {
+      defaultEmployee.teamId = northstarTeam.id;
+      await this.userRepository.save(defaultEmployee);
+    }
 
     await this.contactRepository.save([
       this.contactRepository.create({
@@ -870,6 +1179,26 @@ export class OmegaAdminService implements OnModuleInit {
     }
   }
 
+  private async resolveTeamAssignment(teamId: string | null | undefined, clientId: string | null, actor?: OmegaUser) {
+    if (!teamId) {
+      return null;
+    }
+    if (!clientId) {
+      throw new BadRequestException('workspace must be selected before assigning a team');
+    }
+
+    const team = await this.teamRepository.findOne({ where: { id: teamId } });
+    if (!team) {
+      throw new NotFoundException('Team not found');
+    }
+    if (team.clientId !== clientId) {
+      throw new BadRequestException('Selected team does not belong to the selected workspace');
+    }
+
+    await this.getClientEntity(team.clientId, actor);
+    return team.id;
+  }
+
   private async getClientEntity(id: string, actor?: OmegaUser) {
     const client = await this.clientRepository.findOne({ where: { id } });
     if (!client) {
@@ -914,6 +1243,196 @@ export class OmegaAdminService implements OnModuleInit {
     }
 
     return session;
+  }
+
+  private async syncConversationSnapshot(
+    session: OmegaWhatsappSession,
+    chat: { chatId: string; chatName?: string | null; isGroup?: boolean; timestamp?: number },
+  ) {
+    const existing = await this.conversationRepository.findOne({
+      where: { workspaceSessionId: session.id, chatId: chat.chatId },
+    });
+    const activityAt = chat.timestamp ? new Date(chat.timestamp * 1000) : (existing?.lastActivityAt ?? null);
+
+    if (existing) {
+      return this.conversationRepository.save({
+        ...existing,
+        chatName: chat.chatName ?? existing.chatName,
+        isGroup: chat.isGroup ?? existing.isGroup,
+        lastActivityAt: activityAt,
+      });
+    }
+
+    return this.conversationRepository.save(
+      this.conversationRepository.create({
+        clientId: session.clientId ?? '',
+        workspaceSessionId: session.id,
+        openwaSessionId: session.openwaSessionId,
+        chatId: chat.chatId,
+        chatName: chat.chatName ?? null,
+        channel: 'whatsapp',
+        isGroup: Boolean(chat.isGroup),
+        status: OmegaConversationStatus.OPEN,
+        lastActivityAt: activityAt,
+      }),
+    );
+  }
+
+  private async syncConversationTimelineFromMessages(
+    session: OmegaWhatsappSession,
+    chatId: string,
+    conversation?: OmegaConversation,
+  ) {
+    const currentConversation =
+      conversation ??
+      (await this.syncConversationSnapshot(session, {
+        chatId,
+      }));
+
+    const messages = await this.storedMessageRepository.find({
+      where: { sessionId: session.openwaSessionId, chatId },
+      order: { createdAt: 'ASC' },
+    });
+
+    if (messages.length === 0) {
+      return currentConversation;
+    }
+
+    const firstInbound = messages.find(message => message.direction === MessageDirection.INCOMING);
+    const lastInbound = [...messages].reverse().find(message => message.direction === MessageDirection.INCOMING);
+    const lastOutbound = [...messages].reverse().find(message => message.direction === MessageDirection.OUTGOING);
+
+    let firstResponseAt = currentConversation.firstResponseAt;
+    if (!firstResponseAt && firstInbound) {
+      const inboundMoment = this.resolveMessageDate(firstInbound);
+      const firstOutboundAfterInbound = messages.find(
+        message =>
+          message.direction === MessageDirection.OUTGOING &&
+          this.resolveMessageDate(message).getTime() >= inboundMoment.getTime(),
+      );
+      firstResponseAt = firstOutboundAfterInbound ? this.resolveMessageDate(firstOutboundAfterInbound) : null;
+    }
+
+    return this.conversationRepository.save({
+      ...currentConversation,
+      firstInboundAt: firstInbound ? this.resolveMessageDate(firstInbound) : currentConversation.firstInboundAt,
+      firstResponseAt,
+      lastInboundAt: lastInbound ? this.resolveMessageDate(lastInbound) : currentConversation.lastInboundAt,
+      lastOutboundAt: lastOutbound ? this.resolveMessageDate(lastOutbound) : currentConversation.lastOutboundAt,
+      lastActivityAt: this.resolveMessageDate(messages[messages.length - 1]),
+      status: currentConversation.status ?? OmegaConversationStatus.OPEN,
+    });
+  }
+
+  private async recordConversationEvent(
+    conversation: OmegaConversation,
+    eventType: OmegaConversationEventType,
+    userId?: string | null,
+    responseMs?: number,
+  ) {
+    return this.conversationEventRepository.save(
+      this.conversationEventRepository.create({
+        conversationId: conversation.id,
+        clientId: conversation.clientId,
+        userId: userId ?? null,
+        workspaceSessionId: conversation.workspaceSessionId,
+        openwaSessionId: conversation.openwaSessionId,
+        chatId: conversation.chatId,
+        eventType,
+        responseMs: responseMs ?? null,
+      }),
+    );
+  }
+
+  private resolveMessageDate(message: StoredMessage) {
+    if (typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)) {
+      return new Date(message.timestamp * 1000);
+    }
+
+    return message.createdAt instanceof Date ? message.createdAt : new Date(message.createdAt);
+  }
+
+  private resolveAnalyticsRange(preset?: string, startDate?: string, endDate?: string) {
+    const now = new Date();
+    const normalizedPreset =
+      preset === 'day' || preset === 'week' || preset === 'month' || preset === 'custom' ? preset : 'week';
+
+    if (normalizedPreset === 'custom') {
+      if (!startDate || !endDate) {
+        throw new BadRequestException('Custom date range requires both startDate and endDate');
+      }
+
+      const start = this.startOfDay(new Date(`${startDate}T00:00:00`));
+      const end = this.endOfDay(new Date(`${endDate}T00:00:00`));
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+        throw new BadRequestException('Invalid custom date range');
+      }
+
+      return {
+        preset: normalizedPreset,
+        start,
+        end,
+      };
+    }
+
+    if (normalizedPreset === 'day') {
+      return {
+        preset: normalizedPreset,
+        start: this.startOfDay(now),
+        end: this.endOfDay(now),
+      };
+    }
+
+    if (normalizedPreset === 'month') {
+      return {
+        preset: normalizedPreset,
+        start: this.startOfDay(new Date(now.getFullYear(), now.getMonth(), 1)),
+        end: this.endOfDay(now),
+      };
+    }
+
+    const start = new Date(now);
+    const day = start.getDay();
+    const mondayOffset = day === 0 ? -6 : 1 - day;
+    start.setDate(start.getDate() + mondayOffset);
+
+    return {
+      preset: normalizedPreset,
+      start: this.startOfDay(start),
+      end: this.endOfDay(now),
+    };
+  }
+
+  private startOfDay(date: Date) {
+    const value = new Date(date);
+    value.setHours(0, 0, 0, 0);
+    return value;
+  }
+
+  private endOfDay(date: Date) {
+    const value = new Date(date);
+    value.setHours(23, 59, 59, 999);
+    return value;
+  }
+
+  private toIsoDate(date: Date) {
+    return date.toISOString().slice(0, 10);
+  }
+
+  private averageResponseMs(events: Array<{ responseMs: number | null }>) {
+    return this.averageFromNumbers(
+      events
+        .map(event => event.responseMs)
+        .filter((value): value is number => value !== null && Number.isFinite(value)),
+    );
+  }
+
+  private averageFromNumbers(values: number[]) {
+    if (values.length === 0) {
+      return null;
+    }
+
+    return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
   }
 
   private currentMonth(date = new Date()): string {

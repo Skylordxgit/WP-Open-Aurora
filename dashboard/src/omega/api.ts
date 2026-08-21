@@ -9,8 +9,12 @@ export interface OmegaUser {
   role: OmegaRole;
   status: 'active' | 'inactive';
   isOnDuty: boolean;
+  mustChangePassword: boolean;
   clientId?: string | null;
+  teamId?: string | null;
   companyName?: string | null;
+  workspaceName?: string | null;
+  teamName?: string | null;
   lastLoginAt?: string | null;
 }
 
@@ -31,6 +35,17 @@ export interface OmegaClient {
   usageThisMonth?: number;
   subscriptionStatus?: string;
   userCount?: number;
+}
+
+export interface OmegaTeam {
+  id: string;
+  clientId: string;
+  workspaceName?: string | null;
+  name: string;
+  description?: string | null;
+  status: 'active' | 'inactive';
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface OmegaPlan {
@@ -113,6 +128,39 @@ export interface OmegaDashboardSummary {
     phoneNumber?: string | null;
     companyName?: string | null;
     lastSeenAt?: string | null;
+  }>;
+}
+
+export type OmegaAnalyticsPreset = 'day' | 'week' | 'month' | 'custom';
+
+export interface OmegaEmployeeAnalytics {
+  range: {
+    preset: OmegaAnalyticsPreset;
+    startDate: string;
+    endDate: string;
+  };
+  summary: {
+    activeEmployees: number;
+    handledChats: number;
+    assignedChats: number;
+    closedChats: number;
+    activeChats: number;
+    firstResponseAvgMs: number | null;
+    avgResponseMs: number | null;
+  };
+  employees: Array<{
+    userId: string;
+    fullName: string;
+    email: string;
+    role: OmegaRole;
+    companyName?: string | null;
+    handledChats: number;
+    assignedChats: number;
+    closedChats: number;
+    activeChats: number;
+    firstResponseAvgMs: number | null;
+    avgResponseMs: number | null;
+    repliesCount: number;
   }>;
 }
 
@@ -330,7 +378,11 @@ export async function omegaMe() {
 export async function omegaUpdateMe(fullName: string, password?: string, isOnDuty?: boolean) {
   return omegaFetch<OmegaUser>('/auth/me', {
     method: 'PATCH',
-    body: JSON.stringify({ fullName, ...(password ? { password } : {}), ...(isOnDuty !== undefined ? { isOnDuty } : {}) }),
+    body: JSON.stringify({
+      fullName,
+      ...(password ? { password } : {}),
+      ...(isOnDuty !== undefined ? { isOnDuty } : {}),
+    }),
   });
 }
 
@@ -369,9 +421,18 @@ export const omegaApi = {
   workspaceMarkRead: omegaWorkspaceMarkRead,
   workspaceSendText: omegaWorkspaceSendText,
   dashboard: () => omegaFetch<OmegaDashboardSummary>('/admin/dashboard'),
+  employeeAnalytics: (filters?: { preset?: OmegaAnalyticsPreset; startDate?: string; endDate?: string }) => {
+    const params = new URLSearchParams();
+    if (filters?.preset) params.set('preset', filters.preset);
+    if (filters?.startDate) params.set('startDate', filters.startDate);
+    if (filters?.endDate) params.set('endDate', filters.endDate);
+    const query = params.toString();
+    return omegaFetch<OmegaEmployeeAnalytics>(`/admin/dashboard/employee-analytics${query ? `?${query}` : ''}`);
+  },
   usage: () => omegaFetch<OmegaUsageOverview>('/usage'),
   settings: () => omegaFetch<OmegaSettings>('/admin/settings'),
   clients: () => omegaFetch<OmegaClient[]>('/clients'),
+  teams: () => omegaFetch<OmegaTeam[]>('/teams'),
   client: (id: string) => omegaFetch<OmegaClientDetails>(`/clients/${id}`),
   clientSessions: (clientId: string) => omegaFetch<OmegaSession[]>(`/clients/${clientId}/sessions`),
   clientUsage: (clientId: string) =>
@@ -382,6 +443,10 @@ export const omegaApi = {
     omegaFetch<OmegaClientDetails>('/clients', { method: 'POST', body: JSON.stringify(payload) }),
   updateClient: (id: string, payload: Partial<OmegaClient>) =>
     omegaFetch<OmegaClientDetails>(`/clients/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  createTeam: (payload: Partial<OmegaTeam>) =>
+    omegaFetch<OmegaTeam>('/teams', { method: 'POST', body: JSON.stringify(payload) }),
+  updateTeam: (id: string, payload: Partial<OmegaTeam>) =>
+    omegaFetch<OmegaTeam>(`/teams/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   plans: () => omegaFetch<OmegaPlan[]>('/plans'),
   createPlan: (payload: Partial<OmegaPlan>) =>
     omegaFetch<OmegaPlan>('/plans', { method: 'POST', body: JSON.stringify(payload) }),
@@ -397,7 +462,8 @@ export const omegaApi = {
   syncSessions: () => omegaFetch<OmegaSession[]>('/sessions/sync', { method: 'POST' }),
   assignSession: (sessionId: string, payload: { clientId?: string | null; overrideLimit?: boolean }) =>
     omegaFetch<OmegaSession>(`/sessions/${sessionId}/assign`, { method: 'POST', body: JSON.stringify(payload) }),
-  unassignSession: (sessionId: string) => omegaFetch<OmegaSession>(`/sessions/${sessionId}/unassign`, { method: 'POST' }),
+  unassignSession: (sessionId: string) =>
+    omegaFetch<OmegaSession>(`/sessions/${sessionId}/unassign`, { method: 'POST' }),
   updateReplacement: (sessionId: string, replacementRequested: boolean) =>
     omegaFetch<OmegaSession>(`/sessions/${sessionId}/replacement`, {
       method: 'PATCH',

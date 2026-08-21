@@ -1,6 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { BellRing, ExternalLink, Eye, GitBranchPlus, Pencil, Plus, RotateCcw, Smartphone, VolumeX, X } from 'lucide-react';
+import {
+  BellRing,
+  ExternalLink,
+  Eye,
+  GitBranchPlus,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Smartphone,
+  VolumeX,
+  X,
+} from 'lucide-react';
 import { PageHeader } from '../../components/PageHeader';
 import { useToast } from '../../components/Toast';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle';
@@ -135,31 +146,43 @@ export function OmegaBot() {
   });
   const { data: teams = [], isLoading: teamsLoading } = useQuery({
     queryKey: ['omega-bot-teams'],
-    queryFn: omegaApi.clients,
+    queryFn: omegaApi.teams,
   });
   const { data: users = [] } = useQuery({
     queryKey: ['omega-bot-users'],
     queryFn: omegaApi.users,
   });
 
-  const connectedSessions = useMemo(
-    () => sessions.filter(session => session.status === 'connected'),
-    [sessions],
-  );
+  const connectedSessions = useMemo(() => sessions.filter(session => session.status === 'connected'), [sessions]);
 
   const selectedSession = connectedSessions.find(session => session.id === form.sessionId) ?? null;
   const selectedTeam = teams.find(team => team.id === form.teamId) ?? null;
+  const selectedWorkspaceId = selectedTeam?.clientId ?? null;
   const activeRule = rules.find(rule => rule.id === activeRuleId) ?? null;
 
   const teamAgents = useMemo(
     () =>
       users.filter(
-        user =>
-          user.clientId === form.teamId &&
-          (user.role === 'client_agent' || user.role === 'client_admin'),
+        user => user.teamId === form.teamId && (user.role === 'client_agent' || user.role === 'client_admin'),
       ),
     [form.teamId, users],
   );
+
+  const workspaceScopedSessions = useMemo(() => {
+    if (!selectedWorkspaceId) {
+      return connectedSessions;
+    }
+
+    return connectedSessions.filter(session => !session.clientId || session.clientId === selectedWorkspaceId);
+  }, [connectedSessions, selectedWorkspaceId]);
+
+  const workspaceScopedTeams = useMemo(() => {
+    if (!selectedSession?.clientId) {
+      return teams;
+    }
+
+    return teams.filter(team => team.clientId === selectedSession.clientId);
+  }, [selectedSession, teams]);
 
   const notifyTargets = useMemo(() => {
     if (form.notifyMode === 'team') return teamAgents;
@@ -168,15 +191,36 @@ export function OmegaBot() {
   }, [form.notifyMode, form.notifyUserIds, teamAgents]);
 
   const assignWorkflowMutation = useMutation({
-    mutationFn: async (payload: { sessionId: string; teamId: string }) =>
-      omegaApi.assignSession(payload.sessionId, { clientId: payload.teamId }),
+    mutationFn: async (payload: { sessionId: string; workspaceId: string }) =>
+      omegaApi.assignSession(payload.sessionId, { clientId: payload.workspaceId }),
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['omega-bot-sessions'] }),
         queryClient.invalidateQueries({ queryKey: ['omega-clients'] }),
+        queryClient.invalidateQueries({ queryKey: ['omega-bot-teams'] }),
       ]);
     },
   });
+
+  useEffect(() => {
+    if (!selectedSession || !selectedTeam) {
+      return;
+    }
+
+    if (selectedSession.clientId && selectedSession.clientId !== selectedTeam.clientId) {
+      setForm(prev => ({ ...prev, sessionId: '', notifyUserIds: [] }));
+    }
+  }, [selectedSession, selectedTeam]);
+
+  useEffect(() => {
+    if (!selectedSession || !selectedTeam) {
+      return;
+    }
+
+    if (selectedSession.clientId && selectedSession.clientId !== selectedTeam.clientId) {
+      setForm(prev => ({ ...prev, teamId: '', notifyUserIds: [] }));
+    }
+  }, [selectedSession, selectedTeam]);
 
   useEffect(() => {
     if (!dragState) {
@@ -188,7 +232,10 @@ export function OmegaBot() {
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
       const nextX = Math.max(24, Math.min(event.clientX - rect.left - dragState.offsetX, rect.width - NODE_WIDTH - 24));
-      const nextY = Math.max(24, Math.min(event.clientY - rect.top - dragState.offsetY, rect.height - NODE_HEIGHT - 24));
+      const nextY = Math.max(
+        24,
+        Math.min(event.clientY - rect.top - dragState.offsetY, rect.height - NODE_HEIGHT - 24),
+      );
 
       setEditorNodes(current =>
         current.map(node => (node.id === dragState.id ? { ...node, x: nextX, y: nextY } : node)),
@@ -250,16 +297,16 @@ export function OmegaBot() {
     }
 
     try {
-      await assignWorkflowMutation.mutateAsync({ sessionId: selectedSession.id, teamId: selectedTeam.id });
+      await assignWorkflowMutation.mutateAsync({ sessionId: selectedSession.id, workspaceId: selectedTeam.clientId });
 
       const existingRule = activeRule;
       const nextRule = normalizeRule({
         id: existingRule?.id,
-        name: form.name.trim() || `${selectedTeam.companyName} auto-assign`,
+        name: form.name.trim() || `${selectedTeam.name} auto-assign`,
         sessionId: selectedSession.id,
         sessionName: selectedSession.openwaSessionName || selectedSession.openwaSessionId,
         teamId: selectedTeam.id,
-        teamName: selectedTeam.companyName,
+        teamName: selectedTeam.name,
         notifyMode: form.notifyMode,
         notifyUserIds: form.notifyUserIds,
         channel: form.channel,
@@ -279,7 +326,7 @@ export function OmegaBot() {
 
       toast.success(
         existingRule ? 'Workflow updated' : 'Workflow saved',
-        `Session routed to ${selectedTeam.companyName}. Notify target: ${formatNotifyMode(nextRule.notifyMode)}.`,
+        `Session routed to ${selectedTeam.workspaceName ?? 'workspace'} / ${selectedTeam.name}. Notify target: ${formatNotifyMode(nextRule.notifyMode)}.`,
       );
 
       setView('list');
@@ -328,7 +375,9 @@ export function OmegaBot() {
       return {
         ...node,
         label: 'Auto-assign team',
-        meta: selectedTeam?.companyName || 'Pick a team to route the chats',
+        meta: selectedTeam
+          ? `${selectedTeam.workspaceName ?? 'Workspace'} / ${selectedTeam.name}`
+          : 'Pick a team to route the chats',
         body: 'Assign incoming chats to the selected team',
         icon: <GitBranchPlus size={16} />,
         eyebrow: 'Flow',
@@ -519,7 +568,9 @@ export function OmegaBot() {
               <span>Channel</span>
               <select
                 value={form.channel}
-                onChange={event => setForm(prev => ({ ...prev, channel: event.target.value as 'whatsapp' | 'telegram' }))}
+                onChange={event =>
+                  setForm(prev => ({ ...prev, channel: event.target.value as 'whatsapp' | 'telegram' }))
+                }
               >
                 <option value="whatsapp">WhatsApp</option>
                 <option value="telegram">Telegram</option>
@@ -534,9 +585,10 @@ export function OmegaBot() {
                 disabled={sessionsLoading}
               >
                 <option value="">Select connected session</option>
-                {connectedSessions.map(session => (
+                {workspaceScopedSessions.map(session => (
                   <option key={session.id} value={session.id}>
                     {session.openwaSessionName || session.openwaSessionId}
+                    {session.companyName ? ` - ${session.companyName}` : ''}
                   </option>
                 ))}
               </select>
@@ -550,9 +602,9 @@ export function OmegaBot() {
                 disabled={teamsLoading}
               >
                 <option value="">Select team</option>
-                {teams.map(team => (
+                {workspaceScopedTeams.map(team => (
                   <option key={team.id} value={team.id}>
-                    {team.companyName}
+                    {team.workspaceName ? `${team.workspaceName} / ${team.name}` : team.name}
                   </option>
                 ))}
               </select>
@@ -562,7 +614,9 @@ export function OmegaBot() {
               <span>Notify</span>
               <select
                 value={form.notifyMode}
-                onChange={event => setForm(prev => ({ ...prev, notifyMode: event.target.value as NotifyMode, notifyUserIds: [] }))}
+                onChange={event =>
+                  setForm(prev => ({ ...prev, notifyMode: event.target.value as NotifyMode, notifyUserIds: [] }))
+                }
               >
                 <option value="team">All team agents</option>
                 <option value="on_duty">On-duty agents only</option>
@@ -592,7 +646,9 @@ export function OmegaBot() {
                   </span>
                 </label>
               ))}
-              {teamAgents.length === 0 ? <p className="omega-empty">No agents available in the selected team.</p> : null}
+              {teamAgents.length === 0 ? (
+                <p className="omega-empty">No agents available in the selected team.</p>
+              ) : null}
             </div>
           ) : null}
 
@@ -618,8 +674,17 @@ export function OmegaBot() {
             </aside>
 
             <div className="omega-bot-canvas-shell">
-              <div ref={canvasRef} className="omega-bot-free-canvas" style={{ width: canvasWidth, height: canvasHeight }}>
-                <svg className="omega-bot-links" width={canvasWidth} height={canvasHeight} viewBox={`0 0 ${canvasWidth} ${canvasHeight}`}>
+              <div
+                ref={canvasRef}
+                className="omega-bot-free-canvas"
+                style={{ width: canvasWidth, height: canvasHeight }}
+              >
+                <svg
+                  className="omega-bot-links"
+                  width={canvasWidth}
+                  height={canvasHeight}
+                  viewBox={`0 0 ${canvasWidth} ${canvasHeight}`}
+                >
                   {orderedNodes.slice(0, -1).map((node, index) => {
                     const next = orderedNodes[index + 1];
                     const startX = node.x + NODE_WIDTH;

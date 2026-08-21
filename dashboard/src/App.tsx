@@ -10,6 +10,7 @@ import {
   clearOmegaToken,
   getOmegaToken,
   isOmegaAuthError,
+  omegaApi,
   omegaLogin,
   omegaLogout,
   omegaMe,
@@ -36,52 +37,116 @@ function setStoredOmegaRole(role: OmegaRole | null) {
   localStorage.removeItem('omega_user_role');
 }
 
-function lazyPage<TModule, TComponent extends ComponentType<any>>(
+function lazyPage<TModule, TProps>(
   importer: () => Promise<TModule>,
-  pickDefault: (module: TModule) => { default: TComponent },
+  pickDefault: (module: TModule) => { default: ComponentType<TProps> },
 ) {
   return lazy(async () => {
     try {
       const module = await importer();
-      if (typeof window !== 'undefined') {
-        sessionStorage.removeItem(LAZY_RETRY_KEY);
-      }
+      sessionStorage.removeItem(LAZY_RETRY_KEY);
       return pickDefault(module);
     } catch (error) {
-      if (typeof window !== 'undefined') {
-        const retryPath = sessionStorage.getItem(LAZY_RETRY_KEY);
-        const currentPath = window.location.pathname;
-        if (retryPath !== currentPath) {
-          sessionStorage.setItem(LAZY_RETRY_KEY, currentPath);
-          window.location.reload();
-          return new Promise<never>(() => {});
-        }
+      const retryPath = sessionStorage.getItem(LAZY_RETRY_KEY);
+      const currentPath = window.location.pathname;
+      if (retryPath !== currentPath) {
+        sessionStorage.setItem(LAZY_RETRY_KEY, currentPath);
+        window.location.reload();
+        return new Promise<never>(() => {});
       }
       throw error;
     }
   });
 }
 
-const Login = lazyPage(() => import('./pages/Login'), m => ({ default: m.Login }));
-const Dashboard = lazyPage(() => import('./pages/Dashboard'), m => ({ default: m.Dashboard }));
-const Sessions = lazyPage(() => import('./pages/Sessions'), m => ({ default: m.Sessions }));
-const Chats = lazyPage(() => import('./pages/Chats'), m => ({ default: m.Chats }));
-const Webhooks = lazyPage(() => import('./pages/Webhooks'), m => ({ default: m.Webhooks }));
-const Templates = lazyPage(() => import('./pages/Templates'), m => ({ default: m.Templates }));
-const Logs = lazyPage(() => import('./pages/Logs'), m => ({ default: m.Logs }));
-const ApiKeys = lazyPage(() => import('./pages/ApiKeys'), m => ({ default: m.ApiKeys }));
-const Contacts = lazyPage(() => import('./pages/Contacts'), m => ({ default: m.Contacts }));
-const BulkMessaging = lazyPage(() => import('./pages/BulkMessaging'), m => ({ default: m.BulkMessaging }));
-const MessageTester = lazyPage(() => import('./pages/MessageTester'), m => ({ default: m.MessageTester }));
-const Branding = lazyPage(() => import('./pages/Branding'), m => ({ default: m.Branding }));
-const Infrastructure = lazyPage(() => import('./pages/Infrastructure'), m => ({ default: m.Infrastructure }));
-const Plugins = lazyPage(() => import('./pages/Plugins'), m => ({ default: m.default }));
-const OmegaClients = lazyPage(() => import('./omega/pages/OmegaClients'), m => ({ default: m.OmegaClients }));
-const OmegaClientForm = lazyPage(() => import('./omega/pages/OmegaClientForm'), m => ({ default: m.OmegaClientForm }));
-const OmegaClientDetails = lazyPage(() => import('./omega/pages/OmegaClientDetails'), m => ({ default: m.OmegaClientDetails }));
-const OmegaStaff = lazyPage(() => import('./omega/pages/OmegaStaff'), m => ({ default: m.OmegaStaff }));
-const OmegaTeams = lazyPage(() => import('./omega/pages/OmegaTeams'), m => ({ default: m.OmegaTeams }));
-const OmegaBot = lazyPage(() => import('./omega/pages/OmegaBot'), m => ({ default: m.OmegaBot }));
+const Login = lazyPage(
+  () => import('./pages/Login'),
+  m => ({ default: m.Login }),
+);
+const ForcePasswordReset = lazyPage(
+  () => import('./pages/ForcePasswordReset'),
+  m => ({
+    default: m.ForcePasswordReset,
+  }),
+);
+const Dashboard = lazyPage(
+  () => import('./pages/Dashboard'),
+  m => ({ default: m.Dashboard }),
+);
+const Sessions = lazyPage(
+  () => import('./pages/Sessions'),
+  m => ({ default: m.Sessions }),
+);
+const Chats = lazyPage(
+  () => import('./pages/Chats'),
+  m => ({ default: m.Chats }),
+);
+const Webhooks = lazyPage(
+  () => import('./pages/Webhooks'),
+  m => ({ default: m.Webhooks }),
+);
+const Templates = lazyPage(
+  () => import('./pages/Templates'),
+  m => ({ default: m.Templates }),
+);
+const Logs = lazyPage(
+  () => import('./pages/Logs'),
+  m => ({ default: m.Logs }),
+);
+const ApiKeys = lazyPage(
+  () => import('./pages/ApiKeys'),
+  m => ({ default: m.ApiKeys }),
+);
+const Contacts = lazyPage(
+  () => import('./pages/Contacts'),
+  m => ({ default: m.Contacts }),
+);
+const BulkMessaging = lazyPage(
+  () => import('./pages/BulkMessaging'),
+  m => ({ default: m.BulkMessaging }),
+);
+const MessageTester = lazyPage(
+  () => import('./pages/MessageTester'),
+  m => ({ default: m.MessageTester }),
+);
+const Branding = lazyPage(
+  () => import('./pages/Branding'),
+  m => ({ default: m.Branding }),
+);
+const Infrastructure = lazyPage(
+  () => import('./pages/Infrastructure'),
+  m => ({ default: m.Infrastructure }),
+);
+const Plugins = lazyPage(
+  () => import('./pages/Plugins'),
+  m => ({ default: m.default }),
+);
+const OmegaClients = lazyPage(
+  () => import('./omega/pages/OmegaClients'),
+  m => ({ default: m.OmegaClients }),
+);
+const OmegaClientForm = lazyPage(
+  () => import('./omega/pages/OmegaClientForm'),
+  m => ({ default: m.OmegaClientForm }),
+);
+const OmegaClientDetails = lazyPage(
+  () => import('./omega/pages/OmegaClientDetails'),
+  m => ({
+    default: m.OmegaClientDetails,
+  }),
+);
+const OmegaStaff = lazyPage(
+  () => import('./omega/pages/OmegaStaff'),
+  m => ({ default: m.OmegaStaff }),
+);
+const OmegaTeams = lazyPage(
+  () => import('./omega/pages/OmegaTeams'),
+  m => ({ default: m.OmegaTeams }),
+);
+const OmegaBot = lazyPage(
+  () => import('./omega/pages/OmegaBot'),
+  m => ({ default: m.OmegaBot }),
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -150,6 +215,17 @@ function AppContent() {
     setRole(null);
   };
 
+  const handleRequiredPasswordReset = async (nextPassword: string) => {
+    if (!authUser) {
+      return;
+    }
+
+    const updatedUser = await omegaApi.updateMe(authUser.fullName, nextPassword);
+    setAuthUser(updatedUser);
+    setRole(mapOmegaRoleToDashboardRole(updatedUser.role));
+    setStoredOmegaRole(updatedUser.role);
+  };
+
   useEffect(() => {
     const token = getOmegaToken();
     if (!token) {
@@ -195,10 +271,24 @@ function AppContent() {
     );
   }
 
+  if (authUser.mustChangePassword) {
+    return (
+      <Suspense fallback={loadingFallback}>
+        <ForcePasswordReset
+          fullName={authUser.fullName}
+          onSubmit={handleRequiredPasswordReset}
+          onLogout={handleLogout}
+        />
+      </Suspense>
+    );
+  }
+
   const isDashboardUser = isDashboardOmegaRole(authUser.role);
   const canAccessApiKeys = authUser.role === 'super_admin';
-  const canAccessWorkspaces = authUser.role === 'super_admin' || authUser.role === 'support_admin';
-  const canAccessUsers = authUser.role === 'super_admin' || authUser.role === 'support_admin' || authUser.role === 'client_admin';
+  const canAccessWebhooks = authUser.role === 'super_admin' || authUser.role === 'client_admin';
+  const canAccessWorkspaces = authUser.role === 'super_admin';
+  const canAccessUsers =
+    authUser.role === 'super_admin' || authUser.role === 'support_admin' || authUser.role === 'client_admin';
   const canAccessTeams = canAccessUsers;
   const canAccessBot = canAccessUsers;
   const canAccessBranding = authUser.role === 'super_admin' || authUser.role === 'support_admin';
@@ -211,11 +301,14 @@ function AppContent() {
         <Suspense fallback={loadingFallback}>
           <Routes>
             {isDashboardUser ? (
-              <Route path="/" element={<Layout onLogout={handleLogout} omegaRole={authUser.role} />}>
+              <Route
+                path="/"
+                element={<Layout onLogout={handleLogout} omegaRole={authUser.role} currentUser={authUser} />}
+              >
                 <Route index element={<Dashboard />} />
                 <Route path="sessions" element={<Sessions />} />
                 <Route path="chats" element={<Chats />} />
-                <Route path="webhooks" element={<Webhooks />} />
+                {canAccessWebhooks && <Route path="webhooks" element={<Webhooks />} />}
                 <Route path="templates" element={<Templates />} />
                 <Route path="contacts" element={<Contacts />} />
                 {canAccessApiKeys && <Route path="api-keys" element={<ApiKeys />} />}

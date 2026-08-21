@@ -91,7 +91,12 @@ export class BulkMessageService implements OnApplicationBootstrap {
       throw new BadRequestException(`Batch ID '${batchId}' already exists`);
     }
 
-    const senderConfig = await this.resolveSenderConfig(sessionId, dto.options?.sourceSessionIds, dto.options?.rotateAfterCount, dto.options?.shuffleSenders);
+    const senderConfig = await this.resolveSenderConfig(
+      sessionId,
+      dto.options?.sourceSessionIds,
+      dto.options?.rotateAfterCount,
+      dto.options?.shuffleSenders,
+    );
 
     const options = {
       delayBetweenMessages: dto.options?.delayBetweenMessages ?? 3000,
@@ -385,9 +390,7 @@ export class BulkMessageService implements OnApplicationBootstrap {
 
     const invalid = sessions.filter(item => !item.session || !item.engine).map(item => item.id);
     if (invalid.length > 0) {
-      throw new BadRequestException(
-        `Selected sender sessions are not ready: ${invalid.join(', ')}`,
-      );
+      throw new BadRequestException(`Selected sender sessions are not ready: ${invalid.join(', ')}`);
     }
 
     const orderedIds = deduped.slice();

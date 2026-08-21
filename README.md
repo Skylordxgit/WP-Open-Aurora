@@ -153,9 +153,9 @@ Phase 1 and Phase 2 add a separate SaaS operations layer branded **Omega WA API*
 Default seeded Omega logins come from env vars:
 
 ```env
-OMEGA_ADMIN_EMAIL=admin@omega.local
-OMEGA_ADMIN_PASSWORD=ChangeMe123!
-OMEGA_SUPPORT_EMAIL=support@omega.local
+OMEGA_ADMIN_EMAIL=masteradmin@auroramy.com
+OMEGA_ADMIN_PASSWORD=Abcd1234
+OMEGA_SUPPORT_EMAIL=superadmin@auroramy.com
 ```
 
 Phase 2 adds backend-only OpenWA sync configuration:

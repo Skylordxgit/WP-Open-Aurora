@@ -1,42 +1,14 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { omegaApi, type OmegaClient, type OmegaUser } from '../api';
-
-type TeamMeta = {
-  description: string;
-};
+import { omegaApi, type OmegaTeam, type OmegaUser } from '../api';
 
 type TeamRosterDraft = Record<string, Set<string>>;
 type TeamView = 'settings' | 'member-status';
 
-const TEAM_META_STORAGE_KEY = 'omega_team_meta';
-
-function slugify(value: string) {
-  return value
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function loadTeamMeta(): Record<string, TeamMeta> {
-  try {
-    const raw = localStorage.getItem(TEAM_META_STORAGE_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw) as Record<string, TeamMeta>;
-  } catch {
-    return {};
-  }
-}
-
-function saveTeamMeta(meta: Record<string, TeamMeta>) {
-  localStorage.setItem(TEAM_META_STORAGE_KEY, JSON.stringify(meta));
-}
-
 function formatRole(role: OmegaUser['role']) {
   const labels: Record<OmegaUser['role'], string> = {
-    super_admin: 'Super Admin',
-    support_admin: 'Admin',
+    super_admin: 'Master Admin',
+    support_admin: 'Super Admin',
     client_admin: 'Sub Admin',
     client_agent: 'Employee',
   };
@@ -46,48 +18,58 @@ function formatRole(role: OmegaUser['role']) {
 
 export function OmegaTeams() {
   const queryClient = useQueryClient();
-  const { data: clients = [], isLoading, error } = useQuery({ queryKey: ['omega-clients'], queryFn: omegaApi.clients });
-  const { data: users = [] } = useQuery({ queryKey: ['omega-users'], queryFn: omegaApi.users });
+  const { data: clients = [], isLoading, error } = useQuery({
+    queryKey: ['omega-clients'],
+    queryFn: omegaApi.clients,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+  const { data: teams = [] } = useQuery({
+    queryKey: ['omega-teams'],
+    queryFn: omegaApi.teams,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+  const { data: users = [] } = useQuery({
+    queryKey: ['omega-users'],
+    queryFn: omegaApi.users,
+    staleTime: 15_000,
+    refetchOnWindowFocus: false,
+  });
 
-  const [teamMeta, setTeamMeta] = useState<Record<string, TeamMeta>>(() => loadTeamMeta());
   const [teamSearch, setTeamSearch] = useState<Record<string, string>>({});
   const [rosterDraft, setRosterDraft] = useState<TeamRosterDraft>({});
-  const [createForm, setCreateForm] = useState({ name: '', description: '' });
-  const [editingTeam, setEditingTeam] = useState<OmegaClient | null>(null);
-  const [editForm, setEditForm] = useState({ name: '', description: '', status: 'active' as OmegaClient['status'] });
+  const [createForm, setCreateForm] = useState({ clientId: '', name: '', description: '' });
+  const [editingTeam, setEditingTeam] = useState<OmegaTeam | null>(null);
+  const [editForm, setEditForm] = useState({
+    clientId: '',
+    name: '',
+    description: '',
+    status: 'active' as OmegaTeam['status'],
+  });
   const [activeView, setActiveView] = useState<TeamView>('settings');
   const [memberSearch, setMemberSearch] = useState('');
 
   const invalidateAll = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['omega-clients'] }),
+      queryClient.invalidateQueries({ queryKey: ['omega-teams'] }),
       queryClient.invalidateQueries({ queryKey: ['omega-users'] }),
     ]);
   };
 
-  const createTeamMutation = useMutation({
-    mutationFn: async () => {
-      const slug = slugify(createForm.name) || `team-${Date.now()}`;
-      const team = await omegaApi.createClient({
-        companyName: createForm.name,
-        ownerName: `${createForm.name} Team`,
-        email: `${slug}@team.local`,
-        phone: 'N/A',
-        status: 'active',
-        monthlyMessageLimit: 0,
-        whatsappAccountLimit: 1,
-      });
+  const clientsById = useMemo(() => new Map(clients.map(client => [client.id, client])), [clients]);
 
-      const nextMeta = {
-        ...teamMeta,
-        [team.id]: { description: createForm.description.trim() },
-      };
-      saveTeamMeta(nextMeta);
-      setTeamMeta(nextMeta);
-      return team;
-    },
+  const createTeamMutation = useMutation({
+    mutationFn: () =>
+      omegaApi.createTeam({
+        clientId: createForm.clientId,
+        name: createForm.name.trim(),
+        description: createForm.description.trim(),
+        status: 'active',
+      }),
     onSuccess: async () => {
-      setCreateForm({ name: '', description: '' });
+      setCreateForm({ clientId: '', name: '', description: '' });
       await invalidateAll();
     },
   });
@@ -95,18 +77,12 @@ export function OmegaTeams() {
   const updateTeamMutation = useMutation({
     mutationFn: async () => {
       if (!editingTeam) throw new Error('Team not selected');
-      const updated = await omegaApi.updateClient(editingTeam.id, {
-        companyName: editForm.name,
+      return omegaApi.updateTeam(editingTeam.id, {
+        clientId: editForm.clientId,
+        name: editForm.name.trim(),
+        description: editForm.description.trim(),
         status: editForm.status,
       });
-
-      const nextMeta = {
-        ...teamMeta,
-        [editingTeam.id]: { description: editForm.description.trim() },
-      };
-      saveTeamMeta(nextMeta);
-      setTeamMeta(nextMeta);
-      return updated;
     },
     onSuccess: async () => {
       setEditingTeam(null);
@@ -114,26 +90,20 @@ export function OmegaTeams() {
     },
   });
 
-  const assignUserMutation = useMutation({
-    mutationFn: ({ userId, clientId }: { userId: string; clientId: string | null }) =>
-      omegaApi.updateUser(userId, { clientId }),
-    onSuccess: invalidateAll,
-  });
-
   const saveRosterMutation = useMutation({
-    mutationFn: async ({ clientId }: { clientId: string }) => {
-      const currentMembers = users.filter(user => user.clientId === clientId).map(user => user.id);
-      const selectedMembers = [...(rosterDraft[clientId] ?? new Set(currentMembers))];
+    mutationFn: async ({ team }: { team: OmegaTeam }) => {
+      const currentMembers = users.filter(user => user.teamId === team.id).map(user => user.id);
+      const selectedMembers = [...(rosterDraft[team.id] ?? new Set(currentMembers))];
       const selectedSet = new Set(selectedMembers);
-
       const work: Array<Promise<unknown>> = [];
 
       users.forEach(user => {
-        if (selectedSet.has(user.id) && user.clientId !== clientId) {
-          work.push(omegaApi.updateUser(user.id, { clientId }));
+        if (selectedSet.has(user.id) && user.teamId !== team.id) {
+          work.push(omegaApi.updateUser(user.id, { clientId: team.clientId, teamId: team.id }));
         }
-        if (!selectedSet.has(user.id) && user.clientId === clientId) {
-          work.push(omegaApi.updateUser(user.id, { clientId: null }));
+
+        if (!selectedSet.has(user.id) && user.teamId === team.id) {
+          work.push(omegaApi.updateUser(user.id, { clientId: user.clientId ?? team.clientId, teamId: null }));
         }
       });
 
@@ -142,11 +112,17 @@ export function OmegaTeams() {
     onSuccess: async (_data, variables) => {
       setRosterDraft(prev => {
         const next = { ...prev };
-        delete next[variables.clientId];
+        delete next[variables.team.id];
         return next;
       });
       await invalidateAll();
     },
+  });
+
+  const unassignMemberMutation = useMutation({
+    mutationFn: ({ userId, clientId }: { userId: string; clientId?: string | null }) =>
+      omegaApi.updateUser(userId, { clientId: clientId ?? null, teamId: null }),
+    onSuccess: invalidateAll,
   });
 
   const updateDutyMutation = useMutation({
@@ -155,16 +131,16 @@ export function OmegaTeams() {
     onSuccess: invalidateAll,
   });
 
-  const usersByTeamId = useMemo(() => {
+  const membersByTeamId = useMemo(() => {
     const map = new Map<string, OmegaUser[]>();
-    clients.forEach(client => {
+    teams.forEach(team => {
       map.set(
-        client.id,
-        users.filter(user => user.clientId === client.id),
+        team.id,
+        users.filter(user => user.teamId === team.id),
       );
     });
     return map;
-  }, [clients, users]);
+  }, [teams, users]);
 
   const assignableUsers = useMemo(
     () => users.filter(user => user.role !== 'super_admin' && user.role !== 'support_admin'),
@@ -177,7 +153,7 @@ export function OmegaTeams() {
       .filter(user => user.role === 'client_agent')
       .filter(user => {
         if (!normalized) return true;
-        return [user.fullName, user.email, user.companyName ?? '']
+        return [user.fullName, user.email, user.workspaceName ?? user.companyName ?? '', user.teamName ?? '']
           .join(' ')
           .toLowerCase()
           .includes(normalized);
@@ -220,7 +196,7 @@ export function OmegaTeams() {
             <div className="omega-card-header">
               <div>
                 <h2>Team Management</h2>
-                <p>Create teams, assign members, and maintain the team roster from one place.</p>
+                <p>Create teams under a workspace, then assign members into the correct team roster.</p>
               </div>
             </div>
 
@@ -231,6 +207,20 @@ export function OmegaTeams() {
                 createTeamMutation.mutate();
               }}
             >
+              <label>
+                <span>Workspace</span>
+                <select
+                  value={createForm.clientId}
+                  onChange={event => setCreateForm({ ...createForm, clientId: event.target.value })}
+                >
+                  <option value="">Select workspace</option>
+                  {clients.map(client => (
+                    <option key={client.id} value={client.id}>
+                      {client.companyName}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label>
                 <span>Team name</span>
                 <input
@@ -248,46 +238,61 @@ export function OmegaTeams() {
                 />
               </label>
               <div className="omega-team-create-actions">
-                <button className="omega-primary-button" type="submit" disabled={createTeamMutation.isPending || !createForm.name.trim()}>
+                <button
+                  className="omega-primary-button"
+                  type="submit"
+                  disabled={createTeamMutation.isPending || !createForm.clientId || !createForm.name.trim()}
+                >
                   {createTeamMutation.isPending ? 'Creating...' : 'Create'}
                 </button>
                 <button
                   className="omega-ghost-button"
                   type="button"
-                  onClick={() => setCreateForm({ name: '', description: '' })}
+                  onClick={() => setCreateForm({ clientId: '', name: '', description: '' })}
                 >
                   Reset
                 </button>
               </div>
             </form>
-            {createTeamMutation.error && <div className="omega-inline-error">{(createTeamMutation.error as Error).message}</div>}
+            {createTeamMutation.error && (
+              <div className="omega-inline-error">{(createTeamMutation.error as Error).message}</div>
+            )}
           </section>
 
           <section className="omega-card">
             <div className="omega-card-header">
               <div>
                 <h2>Team Settings</h2>
-                <p>Current teams, roster assignment, and quick edit controls. Total teams: {clients.length}</p>
+                <p>
+                  Current teams, linked workspaces, roster assignment, and quick edit controls. Total teams:{' '}
+                  {teams.length}
+                </p>
               </div>
             </div>
 
             <div className="omega-team-stack">
-              {clients.map(client => {
-                const members = usersByTeamId.get(client.id) ?? [];
-                const search = teamSearch[client.id] ?? '';
-                const currentDraft = rosterDraft[client.id] ?? new Set(members.map(user => user.id));
+              {teams.map(team => {
+                const members = membersByTeamId.get(team.id) ?? [];
+                const search = teamSearch[team.id] ?? '';
+                const currentDraft = rosterDraft[team.id] ?? new Set(members.map(user => user.id));
                 const visibleUsers = assignableUsers.filter(user => {
                   const normalized = search.trim().toLowerCase();
                   if (!normalized) return true;
-                  return [user.fullName, user.email].join(' ').toLowerCase().includes(normalized);
+                  return [user.fullName, user.email, user.workspaceName ?? user.companyName ?? '', user.teamName ?? '']
+                    .join(' ')
+                    .toLowerCase()
+                    .includes(normalized);
                 });
 
                 return (
-                  <article key={client.id} className="omega-team-panel">
+                  <article key={team.id} className="omega-team-panel">
                     <div className="omega-card-header">
                       <div>
-                        <h3>{client.companyName}</h3>
-                        <p>{teamMeta[client.id]?.description || 'No description provided.'}</p>
+                        <h3>{team.name}</h3>
+                        <p>{team.description || 'No description provided.'}</p>
+                        <p>
+                          Workspace: {team.workspaceName ?? clientsById.get(team.clientId)?.companyName ?? 'Unassigned'}
+                        </p>
                         <p>Team members: {members.length}</p>
                       </div>
                       <div className="omega-stack-inline">
@@ -295,11 +300,12 @@ export function OmegaTeams() {
                           className="omega-ghost-button"
                           type="button"
                           onClick={() => {
-                            setEditingTeam(client);
+                            setEditingTeam(team);
                             setEditForm({
-                              name: client.companyName,
-                              description: teamMeta[client.id]?.description ?? '',
-                              status: client.status,
+                              clientId: team.clientId,
+                              name: team.name,
+                              description: team.description ?? '',
+                              status: team.status,
                             });
                           }}
                         >
@@ -314,14 +320,15 @@ export function OmegaTeams() {
                           type="search"
                           className="omega-team-search"
                           value={search}
-                          onChange={event => setTeamSearch(prev => ({ ...prev, [client.id]: event.target.value }))}
-                          placeholder="Search user by name or email"
+                          onChange={event => setTeamSearch(prev => ({ ...prev, [team.id]: event.target.value }))}
+                          placeholder="Search user by name, email, workspace, or team"
                         />
 
                         <div className="omega-team-roster-items">
                           {visibleUsers.map(user => {
                             const isChecked = currentDraft.has(user.id);
-                            const currentTeamName = user.companyName ?? 'No team';
+                            const currentTeamName = user.teamName ?? 'No team';
+                            const currentWorkspaceName = user.workspaceName ?? user.companyName ?? 'No workspace';
 
                             return (
                               <label key={user.id} className="omega-team-user-row">
@@ -330,19 +337,23 @@ export function OmegaTeams() {
                                   checked={isChecked}
                                   onChange={event =>
                                     setRosterDraft(prev => {
-                                      const nextSet = new Set(prev[client.id] ?? members.map(member => member.id));
+                                      const nextSet = new Set(prev[team.id] ?? members.map(member => member.id));
                                       if (event.target.checked) {
                                         nextSet.add(user.id);
                                       } else {
                                         nextSet.delete(user.id);
                                       }
-                                      return { ...prev, [client.id]: nextSet };
+                                      return { ...prev, [team.id]: nextSet };
                                     })
                                   }
                                 />
                                 <div>
-                                  <strong>{user.fullName} ({user.email})</strong>
-                                  <p>{formatRole(user.role)} • Currently in {currentTeamName}</p>
+                                  <strong>
+                                    {user.fullName} ({user.email})
+                                  </strong>
+                                  <p>
+                                    {formatRole(user.role)} • {currentWorkspaceName} • Currently in {currentTeamName}
+                                  </p>
                                 </div>
                               </label>
                             );
@@ -355,7 +366,7 @@ export function OmegaTeams() {
                           className="omega-primary-button omega-team-save-button"
                           type="button"
                           disabled={saveRosterMutation.isPending}
-                          onClick={() => saveRosterMutation.mutate({ clientId: client.id })}
+                          onClick={() => saveRosterMutation.mutate({ team })}
                         >
                           {saveRosterMutation.isPending ? 'Saving...' : 'Save team roster'}
                         </button>
@@ -368,8 +379,13 @@ export function OmegaTeams() {
                           key={member.id}
                           className="omega-team-chip"
                           type="button"
-                          disabled={assignUserMutation.isPending}
-                          onClick={() => assignUserMutation.mutate({ userId: member.id, clientId: null })}
+                          disabled={saveRosterMutation.isPending || unassignMemberMutation.isPending}
+                          onClick={() =>
+                            unassignMemberMutation.mutate({
+                              userId: member.id,
+                              clientId: member.clientId ?? team.clientId,
+                            })
+                          }
                         >
                           {member.fullName} ({member.email}) • {formatRole(member.role)}
                         </button>
@@ -397,15 +413,15 @@ export function OmegaTeams() {
               className="omega-team-search"
               value={memberSearch}
               onChange={event => setMemberSearch(event.target.value)}
-              placeholder="Search name, email, or workspace"
+              placeholder="Search name, email, workspace, or team"
             />
           </div>
 
           <div className="omega-member-status-table">
             <div className="omega-member-status-head">
               <span>Member</span>
+              <span>Workspace</span>
               <span>Team</span>
-              <span>Role</span>
               <span>On duty</span>
             </div>
             <div className="omega-member-status-body">
@@ -415,8 +431,8 @@ export function OmegaTeams() {
                     <strong>{member.fullName}</strong>
                     <p>{member.email}</p>
                   </div>
-                  <span>{member.companyName ?? 'Unassigned'}</span>
-                  <span>{formatRole(member.role)}</span>
+                  <span>{member.workspaceName ?? member.companyName ?? 'Unassigned'}</span>
+                  <span>{member.teamName ?? 'Unassigned'}</span>
                   <label className="omega-duty-switch">
                     <input
                       type="checkbox"
@@ -447,7 +463,7 @@ export function OmegaTeams() {
             <div className="omega-card-header">
               <div>
                 <h2>Edit Team</h2>
-                <p>Update the team name, description, and status.</p>
+                <p>Update the team workspace, name, description, and status.</p>
               </div>
             </div>
             <form
@@ -458,6 +474,19 @@ export function OmegaTeams() {
               }}
             >
               <div className="omega-grid omega-form-grid">
+                <label>
+                  <span>Workspace</span>
+                  <select
+                    value={editForm.clientId}
+                    onChange={event => setEditForm({ ...editForm, clientId: event.target.value })}
+                  >
+                    {clients.map(client => (
+                      <option key={client.id} value={client.id}>
+                        {client.companyName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label>
                   <span>Team name</span>
                   <input
@@ -476,14 +505,16 @@ export function OmegaTeams() {
                   <span>Status</span>
                   <select
                     value={editForm.status}
-                    onChange={event => setEditForm({ ...editForm, status: event.target.value as OmegaClient['status'] })}
+                    onChange={event => setEditForm({ ...editForm, status: event.target.value as OmegaTeam['status'] })}
                   >
                     <option value="active">Active</option>
-                    <option value="suspended">Suspended</option>
+                    <option value="inactive">Inactive</option>
                   </select>
                 </label>
               </div>
-              {updateTeamMutation.error && <div className="omega-inline-error">{(updateTeamMutation.error as Error).message}</div>}
+              {updateTeamMutation.error && (
+                <div className="omega-inline-error">{(updateTeamMutation.error as Error).message}</div>
+              )}
               <div className="omega-modal-actions">
                 <button className="omega-primary-button" type="submit" disabled={updateTeamMutation.isPending}>
                   {updateTeamMutation.isPending ? 'Saving...' : 'Save Team'}

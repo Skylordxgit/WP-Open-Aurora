@@ -1,346 +1,395 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useTranslation } from 'react-i18next';
+import { useEffect, useRef, useState } from 'react';
 import {
+  Activity,
   CalendarRange,
+  CheckCircle2,
   Clock3,
   Loader2,
-  MessageSquare,
-  Send,
-  Webhook,
+  MessageSquareText,
+  RefreshCcw,
+  Users,
 } from 'lucide-react';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
-import {
-  useDashboardStatsQuery,
-  useSessionsQuery,
-  useStopSessionMutation,
-  useWebhooksQuery,
-} from '../hooks/queries';
 import { PageHeader } from '../components/PageHeader';
-import type { DashboardPeriod } from '../services/api';
+import {
+  omegaApi,
+  type OmegaAnalyticsPreset,
+  type OmegaDashboardSummary,
+  type OmegaEmployeeAnalytics,
+} from '../omega/api';
 import './Dashboard.css';
 
-const formatInputDate = (date: Date) => {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-};
+function formatDateInput(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function formatDuration(ms: number | null) {
+  if (ms === null || ms < 0) {
+    return '—';
+  }
+
+  const totalSeconds = Math.round(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+
+  return `${seconds}s`;
+}
+
+function formatRole(role: string) {
+  const labels: Record<string, string> = {
+    super_admin: 'Master Admin',
+    support_admin: 'Super Admin',
+    client_admin: 'Sub Admin',
+    client_agent: 'Employee',
+  };
+
+  return labels[role] ?? role.replace(/_/g, ' ');
+}
+
+function getPresetLabel(preset: OmegaAnalyticsPreset) {
+  if (preset === 'day') return 'Today';
+  if (preset === 'week') return 'This week';
+  if (preset === 'month') return 'This month';
+  return 'Custom range';
+}
 
 export function Dashboard() {
-  const { t } = useTranslation();
-  useDocumentTitle(t('dashboard.title'));
-  const navigate = useNavigate();
-  const [period, setPeriod] = useState<DashboardPeriod>('today');
-  const [startDate, setStartDate] = useState<string>(formatInputDate(new Date()));
-  const [endDate, setEndDate] = useState<string>(formatInputDate(new Date()));
+  useDocumentTitle('Dashboard');
 
-  const queryParams =
-    period === 'custom'
-      ? { period, startDate: `${startDate}T00:00:00.000Z`, endDate: `${endDate}T23:59:59.999Z` }
-      : { period };
+  const [dashboard, setDashboard] = useState<OmegaDashboardSummary | null>(null);
+  const [analytics, setAnalytics] = useState<OmegaEmployeeAnalytics | null>(null);
+  const [preset, setPreset] = useState<OmegaAnalyticsPreset>('week');
+  const [customStartDate, setCustomStartDate] = useState(() => {
+    const start = new Date();
+    start.setDate(start.getDate() - 6);
+    return formatDateInput(start);
+  });
+  const [customEndDate, setCustomEndDate] = useState(() => formatDateInput(new Date()));
+  const [draftStartDate, setDraftStartDate] = useState(() => {
+    const start = new Date();
+    start.setDate(start.getDate() - 6);
+    return formatDateInput(start);
+  });
+  const [draftEndDate, setDraftEndDate] = useState(() => formatDateInput(new Date()));
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [error, setError] = useState('');
+  const [refreshKey, setRefreshKey] = useState(0);
+  const hasLoadedOnceRef = useRef(false);
 
-  const { data: analytics, isLoading: loadingAnalytics, error: analyticsError } = useDashboardStatsQuery(queryParams);
-  const { data: sessions = [], isLoading: loadingSessions, error: sessionsError } = useSessionsQuery();
-  const { data: webhooks = [] } = useWebhooksQuery();
-  const stopMutation = useStopSessionMutation();
+  useEffect(() => {
+    let cancelled = false;
 
-  const loading = loadingAnalytics || loadingSessions;
-  const error = analyticsError instanceof Error
-    ? analyticsError.message
-    : sessionsError instanceof Error
-      ? sessionsError.message
-      : analyticsError || sessionsError
-        ? t('dashboard.loadError')
-        : null;
+    const loadDashboard = async () => {
+      if (preset === 'custom' && (!customStartDate || !customEndDate)) {
+        return;
+      }
 
-  const handleDisconnect = async (id: string) => {
-    try {
-      await stopMutation.mutateAsync(id);
-    } catch (err) {
-      console.error('Failed to disconnect:', err);
-    }
-  };
+      setError('');
+      if (hasLoadedOnceRef.current) {
+        setIsRefreshing(true);
+      } else {
+        setIsLoading(true);
+      }
 
-  const formatLastActive = (date?: string | null) => {
-    if (!date) return t('common.never');
-    const diff = Date.now() - new Date(date).getTime();
-    if (diff < 60000) return t('common.justNow');
-    if (diff < 3600000) return t('common.minAgo', { count: Math.floor(diff / 60000) });
-    if (diff < 86400000) return t('common.hoursAgo', { count: Math.floor(diff / 3600000) });
-    return new Date(date).toLocaleDateString();
-  };
+      try {
+        const [dashboardSummary, employeeAnalytics] = await Promise.all([
+          omegaApi.dashboard(),
+          omegaApi.employeeAnalytics({
+            preset,
+            ...(preset === 'custom' ? { startDate: customStartDate, endDate: customEndDate } : {}),
+          }),
+        ]);
 
-  const formatStatus = (status: string) => t(`sessionStatus.${status}`, { defaultValue: status });
-  const formatMetric = (value: number | null | undefined, suffix = '') =>
-    value == null ? '—' : `${value.toLocaleString()}${suffix}`;
-  const formatResponse = (value: number | null | undefined) => (value == null ? '—' : `${value.toFixed(1)} min`);
+        if (cancelled) {
+          return;
+        }
 
-  if (loading) {
-    return (
-      <div
-        className="dashboard"
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '400px' }}
-      >
-        <Loader2 className="animate-spin" size={32} />
-      </div>
-    );
-  }
+        setDashboard(dashboardSummary);
+        setAnalytics(employeeAnalytics);
+        hasLoadedOnceRef.current = true;
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError instanceof Error ? loadError.message : 'Unable to load dashboard');
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+          setIsRefreshing(false);
+        }
+      }
+    };
 
-  if (error || !analytics) {
-    return (
-      <div className="dashboard" style={{ padding: '2rem' }}>
-        <div style={{ background: '#FEE2E2', padding: '1rem', borderRadius: '8px', color: '#DC2626' }}>
-          {t('dashboard.errorPrefix', { message: error || t('dashboard.loadError') })}
-        </div>
-      </div>
-    );
-  }
+    void loadDashboard();
 
-  const selected = analytics.messages.selectedPeriod;
+    return () => {
+      cancelled = true;
+    };
+  }, [preset, customStartDate, customEndDate, refreshKey]);
+
   const statsCards = [
     {
-      label: 'Chats handled',
-      value: selected.handledChats,
-      icon: MessageSquare,
-      helper: `${selected.activeChats} active chats in range`,
+      label: 'Active sessions',
+      value: dashboard?.stats.connectedSessions ?? 0,
+      helper: `${dashboard?.stats.totalSessions ?? 0} total connected workspaces`,
+      icon: Activity,
     },
     {
-      label: period === 'today' ? 'Messages today' : 'Messages in range',
-      value: selected.total,
-      icon: Send,
-      helper: `${selected.received} inbound / ${selected.sent} outbound`,
+      label: 'Messages today',
+      value: dashboard?.stats.messagesToday ?? 0,
+      helper: `${dashboard?.stats.messagesThisMonth ?? 0} this month`,
+      icon: MessageSquareText,
     },
     {
-      label: 'Average response time',
-      value: formatResponse(selected.avgResponseMinutes),
+      label: 'Active employees',
+      value: analytics?.summary.activeEmployees ?? 0,
+      helper: `${analytics?.employees.length ?? 0} scoped team members`,
+      icon: Users,
+    },
+    {
+      label: 'Handled chats',
+      value: analytics?.summary.handledChats ?? 0,
+      helper: `${analytics?.summary.assignedChats ?? 0} assigned in range`,
+      icon: CheckCircle2,
+    },
+    {
+      label: 'First response',
+      value: formatDuration(analytics?.summary.firstResponseAvgMs ?? null),
+      helper: 'Average first reply time',
       icon: Clock3,
-      helper: `${selected.respondedChats} responded, ${selected.pendingChats} waiting`,
     },
     {
-      label: 'Webhooks configured',
-      value: webhooks.length,
-      icon: Webhook,
-      helper: `${analytics.sessions.active} connected sessions right now`,
+      label: 'Avg response',
+      value: formatDuration(analytics?.summary.avgResponseMs ?? null),
+      helper: `${analytics?.summary.closedChats ?? 0} chats closed in range`,
+      icon: CalendarRange,
     },
   ];
 
+  if (isLoading) {
+    return (
+      <div className="dashboard dashboard-loading">
+        <Loader2 className="dashboard-spinner" size={32} />
+      </div>
+    );
+  }
+
   return (
-    <div className="dashboard">
+    <div className="dashboard dashboard-omega">
       <PageHeader
-        title={t('dashboard.title')}
-        subtitle={t('dashboard.subtitle')}
+        title="Dashboard"
+        subtitle="Track employee chat workload, response speed, assignments, and closures across your Aurora workspace."
         badge={
-          <span className={`status-badge ${analytics.sessions.active > 0 ? 'connected' : 'disconnected'}`}>
-            {analytics.sessions.active > 0 ? t('common.connected') : t('common.disconnected')}
+          <span
+            className={`status-badge ${(dashboard?.stats.connectedSessions ?? 0) > 0 ? 'connected' : 'disconnected'}`}
+          >
+            {(dashboard?.stats.connectedSessions ?? 0) > 0 ? 'Live operations' : 'Disconnected'}
           </span>
+        }
+        actions={
+          <div className="dashboard-controls">
+            <div className="dashboard-preset-group">
+              {(['day', 'week', 'month', 'custom'] as OmegaAnalyticsPreset[]).map(option => (
+                <button
+                  key={option}
+                  type="button"
+                  className={`dashboard-preset-button ${preset === option ? 'active' : ''}`}
+                  onClick={() => setPreset(option)}
+                >
+                  {getPresetLabel(option)}
+                </button>
+              ))}
+            </div>
+            {preset === 'custom' && (
+              <div className="dashboard-date-range">
+                <input type="date" value={draftStartDate} onChange={event => setDraftStartDate(event.target.value)} />
+                <input type="date" value={draftEndDate} onChange={event => setDraftEndDate(event.target.value)} />
+                <button
+                  type="button"
+                  className="dashboard-apply-button"
+                  onClick={() => {
+                    setCustomStartDate(draftStartDate);
+                    setCustomEndDate(draftEndDate);
+                  }}
+                  disabled={!draftStartDate || !draftEndDate || isRefreshing}
+                >
+                  Apply
+                </button>
+              </div>
+            )}
+            <button
+              type="button"
+              className="dashboard-refresh-button"
+              onClick={() => setRefreshKey(current => current + 1)}
+              disabled={isRefreshing}
+            >
+              <RefreshCcw size={16} className={isRefreshing ? 'spin' : ''} />
+              Refresh
+            </button>
+          </div>
         }
       />
 
-      <section className="dashboard-toolbar">
-        <div className="dashboard-toolbar-group">
-          {(['today', '7d', '30d', 'custom'] as DashboardPeriod[]).map(option => (
-            <button
-              key={option}
-              type="button"
-              className={`dashboard-filter-chip ${period === option ? 'active' : ''}`}
-              onClick={() => setPeriod(option)}
-            >
-              {option === 'today' ? 'Today' : option === '7d' ? 'Weekly' : option === '30d' ? 'Monthly' : 'Custom'}
-            </button>
-          ))}
-        </div>
-        <div className="dashboard-toolbar-group dashboard-toolbar-group--dates">
-          <div className="dashboard-date-field">
-            <CalendarRange size={16} />
-            <input type="date" value={startDate} onChange={event => setStartDate(event.target.value)} disabled={period !== 'custom'} />
-          </div>
-          <div className="dashboard-date-field">
-            <CalendarRange size={16} />
-            <input type="date" value={endDate} onChange={event => setEndDate(event.target.value)} disabled={period !== 'custom'} />
-          </div>
-        </div>
-      </section>
+      {error ? <div className="dashboard-error">{error}</div> : null}
 
-      <div className="stats-grid">
-        {statsCards.map(({ label, value, icon: Icon, helper }) => (
-          <div key={label} className="stat-card">
-            <Icon className="stat-watermark" />
+      <div className="dashboard-range-summary">
+        <div className="dashboard-range-copy">
+          <span>{analytics ? `${getPresetLabel(analytics.range.preset)} view` : 'Range view'}</span>
+          <strong>
+            {analytics?.range.startDate ?? '—'} to {analytics?.range.endDate ?? '—'}
+          </strong>
+        </div>
+        <div className="dashboard-range-editor">
+          <input
+            type="date"
+            value={draftStartDate}
+            onChange={event => {
+              setPreset('custom');
+              setDraftStartDate(event.target.value);
+            }}
+          />
+          <span className="dashboard-range-separator">to</span>
+          <input
+            type="date"
+            value={draftEndDate}
+            onChange={event => {
+              setPreset('custom');
+              setDraftEndDate(event.target.value);
+            }}
+          />
+          <button
+            type="button"
+            className="dashboard-apply-button"
+            onClick={() => {
+              setPreset('custom');
+              setCustomStartDate(draftStartDate);
+              setCustomEndDate(draftEndDate);
+            }}
+            disabled={!draftStartDate || !draftEndDate || isRefreshing}
+          >
+            Use custom range
+          </button>
+        </div>
+      </div>
+
+      <div className="stats-grid dashboard-stats-grid">
+        {statsCards.map(({ label, value, helper, icon: Icon }) => (
+          <article key={label} className="stat-card dashboard-stat-card">
             <div className="stat-header">
               <span className="stat-label">{label}</span>
-              <Icon size={20} className="stat-icon" />
+              <Icon size={18} className="stat-icon" />
             </div>
             <div className="stat-value">{typeof value === 'number' ? value.toLocaleString() : value}</div>
-            <div className="stat-helper">{helper}</div>
-          </div>
+            <p className="dashboard-stat-helper">{helper}</p>
+          </article>
         ))}
       </div>
 
-      <section className="dashboard-insights-grid">
-        <div className="dashboard-panel">
-          <div className="section-header">
-            <h2>Activity timeline</h2>
-            <span className="section-subtitle">
-              {new Date(analytics.range.startDate).toLocaleDateString()} to {new Date(analytics.range.endDate).toLocaleDateString()}
-            </span>
-          </div>
-          <div className="activity-list">
-            {analytics.activitySeries.length === 0 ? (
-              <div className="activity-empty">No chat activity found for the selected range.</div>
-            ) : (
-              analytics.activitySeries.slice(-10).map(point => (
-                <div key={point.label} className="activity-row">
-                  <span className="activity-label">{point.label}</span>
-                  <div className="activity-bars">
-                    <span className="activity-pill incoming">{point.received} in</span>
-                    <span className="activity-pill outgoing">{point.sent} out</span>
-                    <span className="activity-pill handled">{point.handledChats} handled</span>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        <div className="dashboard-panel">
-          <div className="section-header">
-            <h2>Session productivity</h2>
-            <span className="section-subtitle">{analytics.sessionPerformance.length} operator workspaces</span>
-          </div>
-          <div className="dashboard-kpis">
-            <div className="dashboard-kpi-card">
-              <span>Incoming</span>
-              <strong>{selected.received.toLocaleString()}</strong>
-            </div>
-            <div className="dashboard-kpi-card">
-              <span>Outgoing</span>
-              <strong>{selected.sent.toLocaleString()}</strong>
-            </div>
-            <div className="dashboard-kpi-card">
-              <span>Failed</span>
-              <strong>{selected.failed.toLocaleString()}</strong>
-            </div>
-            <div className="dashboard-kpi-card">
-              <span>Avg/day</span>
-              <strong>{formatMetric(analytics.sessionPerformance.reduce((sum, row) => sum + row.messagesPerDay, 0))}</strong>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="sessions-section">
+      <section className="dashboard-table-section">
         <div className="section-header">
-          <h2>Operator performance by session</h2>
-          <span className="section-subtitle">
-            {analytics.sessionPerformance.length} sessions tracked across {analytics.range.days} day{analytics.range.days === 1 ? '' : 's'}
-          </span>
-        </div>
-
-        <div className="analytics-table">
-          <div className="table-header analytics-table-header">
-            <span>Session</span>
-            <span>Handled chats</span>
-            <span>Messages</span>
-            <span>Response time</span>
-            <span>Last reply</span>
-            <span>Actions</span>
+          <div>
+            <h2>Employee performance</h2>
+            <p className="section-subtitle">
+              Daily, weekly, monthly, or custom-range chat handling performance for each scoped employee.
+            </p>
           </div>
-          {analytics.sessionPerformance.length === 0 ? (
-            <div className="table-row analytics-table-row analytics-table-row--empty">No session analytics found for this range.</div>
-          ) : (
-            analytics.sessionPerformance.map(row => {
-              const liveSession = sessions.find(session => session.id === row.sessionId);
-              return (
-                <div key={row.sessionId} className="table-row analytics-table-row">
-                  <div className="session-info-cell">
-                    <span className="session-id">{row.name}</span>
-                    <span className="session-name" title={row.sessionId}>
-                      {row.phone || row.sessionId.slice(0, 18)}
-                    </span>
-                    <span className={`status-pill ${liveSession?.status || row.status}`}>{formatStatus(liveSession?.status || row.status)}</span>
-                  </div>
-                  <div className="metric-stack">
-                    <strong>{row.handledChats}</strong>
-                    <span>{row.activeChats} active chats</span>
-                  </div>
-                  <div className="metric-stack">
-                    <strong>{row.incoming + row.outgoing}</strong>
-                    <span>
-                      {row.incoming} in / {row.outgoing} out
-                    </span>
-                  </div>
-                  <div className="metric-stack">
-                    <strong>{formatResponse(row.avgResponseMinutes)}</strong>
-                    <span>{row.failed} failed</span>
-                  </div>
-                  <div className="metric-stack">
-                    <strong>{formatLastActive(row.lastResponseAt)}</strong>
-                    <span>{row.lastInboundAt ? `Inbound ${formatLastActive(row.lastInboundAt)}` : 'No inbound yet'}</span>
-                  </div>
-                  <div className="actions">
-                    <button className="btn-sm" onClick={() => navigate('/sessions')}>
-                      {t('dashboard.view')}
-                    </button>
-                    {liveSession && ['ready', 'initializing', 'connecting', 'qr_ready'].includes(liveSession.status) && (
-                      <button className="btn-sm danger" onClick={() => handleDisconnect(liveSession.id)}>
-                        {t('dashboard.disconnect')}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-      </section>
-
-      <section className="sessions-section">
-        <div className="section-header">
-          <h2>{t('dashboard.sessionsOverview')}</h2>
-          <span className="section-subtitle">
-            {t('dashboard.showingSessions', { shown: sessions.length, total: analytics.sessions.total })}
-          </span>
         </div>
 
-        <div className="sessions-table">
-          <div className="table-header">
-            <span>{t('dashboard.columns.sessionId')}</span>
-            <span>{t('dashboard.columns.phone')}</span>
-            <span>{t('dashboard.columns.status')}</span>
-            <span>{t('dashboard.columns.lastActive')}</span>
-            <span>{t('dashboard.columns.actions')}</span>
+        <div className="dashboard-table">
+          <div className="dashboard-table-head">
+            <span>Employee</span>
+            <span>Role</span>
+            <span>Workspace</span>
+            <span>Handled</span>
+            <span>Assigned</span>
+            <span>Closed</span>
+            <span>Open now</span>
+            <span>First response</span>
+            <span>Avg response</span>
           </div>
-          {sessions.length === 0 ? (
-            <div className="table-row" style={{ justifyContent: 'center', color: 'var(--text-muted)' }}>
-              {t('dashboard.noSessions')}
-            </div>
-          ) : (
-            sessions.map(session => (
-              <div key={session.id} className="table-row">
-                <div className="session-info-cell">
-                  <span className="session-id">{session.id.substring(0, 12)}</span>
-                  <span className="session-name" title={session.name}>
-                    {session.name}
-                  </span>
+          {analytics && analytics.employees.length > 0 ? (
+            analytics.employees.map(employee => (
+              <div key={employee.userId} className="dashboard-table-row">
+                <div className="dashboard-employee-cell">
+                  <strong>{employee.fullName}</strong>
+                  <span>{employee.email}</span>
                 </div>
-                <span className="phone">{session.phone || '—'}</span>
-                <span className={`status-pill ${session.status}`}>{formatStatus(session.status)}</span>
-                <span className="last-active">{formatLastActive(session.lastActive)}</span>
-                <div className="actions">
-                  <button className="btn-sm" onClick={() => navigate('/sessions')}>
-                    {t('dashboard.view')}
-                  </button>
-                  {['ready', 'initializing', 'connecting', 'qr_ready'].includes(session.status) && (
-                    <button className="btn-sm danger" onClick={() => handleDisconnect(session.id)}>
-                      {t('dashboard.disconnect')}
-                    </button>
-                  )}
-                </div>
+                <span>{formatRole(employee.role)}</span>
+                <span>{employee.companyName ?? 'Unassigned'}</span>
+                <span>{employee.handledChats}</span>
+                <span>{employee.assignedChats}</span>
+                <span>{employee.closedChats}</span>
+                <span>{employee.activeChats}</span>
+                <span>{formatDuration(employee.firstResponseAvgMs)}</span>
+                <span>{formatDuration(employee.avgResponseMs)}</span>
               </div>
             ))
+          ) : (
+            <div className="dashboard-empty-state">
+              Employee analytics will appear here as soon as chats are assigned and agents begin replying.
+            </div>
           )}
         </div>
       </section>
+
+      <div className="dashboard-secondary-grid">
+        <section className="dashboard-panel">
+          <div className="section-header">
+            <div>
+              <h2>Top workspaces</h2>
+              <p className="section-subtitle">Highest message volume in the current Aurora scope.</p>
+            </div>
+          </div>
+          <div className="dashboard-list">
+            {dashboard && dashboard.topClients.length > 0 ? (
+              dashboard.topClients.map(client => (
+                <div key={client.clientId} className="dashboard-list-row">
+                  <div>
+                    <strong>{client.companyName}</strong>
+                    <span>Workspace traffic</span>
+                  </div>
+                  <strong>{client.units.toLocaleString()}</strong>
+                </div>
+              ))
+            ) : (
+              <div className="dashboard-empty-state compact">No workspace traffic yet.</div>
+            )}
+          </div>
+        </section>
+
+        <section className="dashboard-panel">
+          <div className="section-header">
+            <div>
+              <h2>Reconnect queue</h2>
+              <p className="section-subtitle">Sessions that still need attention from the operations team.</p>
+            </div>
+          </div>
+          <div className="dashboard-list">
+            {dashboard && dashboard.reconnectQueue.length > 0 ? (
+              dashboard.reconnectQueue.map(session => (
+                <div key={session.id} className="dashboard-list-row">
+                  <div>
+                    <strong>{session.openwaSessionName ?? session.openwaSessionId}</strong>
+                    <span>{session.companyName ?? 'Unassigned workspace'}</span>
+                  </div>
+                  <strong>{session.phoneNumber ?? 'No number'}</strong>
+                </div>
+              ))
+            ) : (
+              <div className="dashboard-empty-state compact">All assigned sessions are healthy right now.</div>
+            )}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }

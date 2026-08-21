@@ -205,6 +205,23 @@ describe('MessageService', () => {
       expect(repository.create).toHaveBeenCalledWith(expect.objectContaining({ chatId: '152695264563252@lid' }));
     });
 
+    it('reuses the latest stored senderPhone before asking WhatsApp to resolve the privacy id again', async () => {
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({
+        continue: true,
+        data: { input: { chatId: '152695264563252@lid', text: 'hello' } },
+      });
+      (repository.findOne as jest.Mock).mockResolvedValueOnce({
+        metadata: { senderPhone: '628777888999' },
+        createdAt: new Date(),
+      });
+      mockEngine.getNumberId.mockResolvedValueOnce('628777888999@c.us');
+
+      await service.sendText('sess-1', { chatId: '152695264563252@lid', text: 'hello' });
+
+      expect(mockEngine.resolveContactPhone).not.toHaveBeenCalled();
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628777888999@c.us', 'hello');
+    });
+
     it('returns a clear client error when an unresolved privacy-id send fails', async () => {
       (hookManager.execute as jest.Mock).mockResolvedValueOnce({
         continue: true,

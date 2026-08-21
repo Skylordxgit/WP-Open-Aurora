@@ -415,8 +415,7 @@
   padding: 2rem;
   background:
     radial-gradient(circle at top left, rgba(37, 211, 102, 0.18), transparent 28%),
-    radial-gradient(circle at bottom right, rgba(16, 185, 129, 0.14), transparent 30%),
-    var(--sidebar-bg);
+    radial-gradient(circle at bottom right, rgba(16, 185, 129, 0.14), transparent 30%), var(--sidebar-bg);
 }
 
 .omega-login-card {
@@ -539,7 +538,14 @@
 .omega-user-table-head,
 .omega-user-row {
   display: grid;
-  grid-template-columns: minmax(240px, 2.1fr) minmax(110px, 0.9fr) minmax(110px, 0.85fr) minmax(140px, 1fr) minmax(150px, 1.1fr) minmax(110px, 0.8fr);
+  grid-template-columns:
+    minmax(240px, 2.1fr)
+    minmax(110px, 0.8fr)
+    minmax(110px, 0.8fr)
+    minmax(150px, 1fr)
+    minmax(150px, 1fr)
+    minmax(150px, 1fr)
+    minmax(110px, 0.8fr);
   gap: 1rem;
   align-items: center;
 }
@@ -626,13 +632,14 @@
 
 .omega-team-create-form {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.2fr) auto;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) minmax(280px, 1.2fr) auto;
   gap: 0.85rem;
   align-items: end;
 }
 
 .omega-team-create-form label,
-.omega-team-create-form input {
+.omega-team-create-form input,
+.omega-team-create-form select {
   width: 100%;
 }
 
@@ -642,6 +649,7 @@
 }
 
 .omega-team-create-form input,
+.omega-team-create-form select,
 .omega-team-search {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -788,6 +796,7 @@
   height: 30px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--border) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
   transition: background 0.2s ease;
   cursor: pointer;
 }
@@ -806,7 +815,8 @@
 }
 
 .omega-duty-switch input:checked + .omega-duty-switch-track {
-  background: color-mix(in srgb, var(--accent) 62%, white);
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.92), rgba(22, 163, 74, 0.86));
+  border-color: rgba(34, 197, 94, 0.65);
 }
 
 .omega-duty-switch input:checked + .omega-duty-switch-track::after {
@@ -819,7 +829,7 @@
 }
 
 .omega-duty-switch input:checked ~ em {
-  color: var(--accent);
+  color: #22c55e;
   font-weight: 700;
 }
 
@@ -887,7 +897,10 @@
 .omega-bot-table-head,
 .omega-bot-table-row {
   display: grid;
-  grid-template-columns: minmax(220px, 2fr) minmax(120px, 0.8fr) minmax(120px, 0.85fr) minmax(180px, 1.1fr) minmax(170px, 1fr);
+  grid-template-columns: minmax(220px, 2fr) minmax(120px, 0.8fr) minmax(120px, 0.85fr) minmax(180px, 1.1fr) minmax(
+      170px,
+      1fr
+    );
   gap: 1rem;
   align-items: center;
 }
@@ -1064,7 +1077,9 @@
   background:
     radial-gradient(circle, rgba(148, 163, 184, 0.18) 1px, transparent 1.5px),
     linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(248, 250, 252, 0.95));
-  background-size: 18px 18px, auto;
+  background-size:
+    18px 18px,
+    auto;
 }
 
 .omega-bot-free-canvas {
@@ -1091,9 +1106,7 @@
   min-height: 124px;
   border-radius: 22px;
   border: 1px solid var(--border);
-  background:
-    radial-gradient(circle at top right, rgba(56, 189, 248, 0.08), transparent 34%),
-    var(--bg-white);
+  background: radial-gradient(circle at top right, rgba(56, 189, 248, 0.08), transparent 34%), var(--bg-white);
   padding: 1rem;
   display: grid;
   align-content: start;

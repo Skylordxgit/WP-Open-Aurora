@@ -54,6 +54,19 @@ export enum OmegaMessageStatus {
   READ = 'read',
 }
 
+export enum OmegaConversationStatus {
+  OPEN = 'open',
+  CLOSED = 'closed',
+}
+
+export enum OmegaConversationEventType {
+  ASSIGNED = 'assigned',
+  FIRST_RESPONSE = 'first_response',
+  REPLIED = 'replied',
+  CLOSED = 'closed',
+  REOPENED = 'reopened',
+}
+
 export enum OmegaUsageMetricType {
   MESSAGES = 'messages',
   SESSION_REPLACEMENT = 'session_replacement',

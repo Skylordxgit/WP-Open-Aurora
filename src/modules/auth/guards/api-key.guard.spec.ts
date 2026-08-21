@@ -92,8 +92,7 @@ describe('ApiKeyGuard', () => {
   });
 
   it('should reject requests without X-API-Key header', async () => {
-    reflector
-      .getAllAndOverride
+    reflector.getAllAndOverride
       .mockReturnValueOnce(false) // isPublic
       .mockReturnValueOnce(undefined) // skipApiKey
       .mockReturnValueOnce(undefined); // requiredRole
