@@ -47,9 +47,17 @@ import {
 import { OmegaAuthService } from './omega-auth.service';
 import { OpenwaApiClientService } from './openwa-api-client.service';
 import { OmegaUsageService } from './omega-usage.service';
+import {
+  mergeWorkspaceMessageHistory,
+  normalizeLiveWorkspaceMessage,
+  WorkspaceHistoryMessage,
+} from './workspace-message-history';
 
 @Injectable()
 export class OmegaAdminService implements OnModuleInit {
+  private static readonly WORKSPACE_HISTORY_PAGE_SIZE = 100;
+  private static readonly WORKSPACE_HISTORY_MAX = 500;
+
   constructor(
     private readonly configService: ConfigService,
     private readonly omegaAuthService: OmegaAuthService,
@@ -707,10 +715,7 @@ export class OmegaAdminService implements OnModuleInit {
       }),
     );
 
-    const chats = chatBuckets
-      .flat()
-      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
-      .slice(0, 20);
+    const chats = chatBuckets.flat().sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
 
     return {
       companyName,
@@ -727,9 +732,48 @@ export class OmegaAdminService implements OnModuleInit {
   async getWorkspaceMessages(user: OmegaUser, workspaceSessionId: string, chatId: string, limit = 100) {
     const session = await this.getWorkspaceSessionForUser(user, workspaceSessionId);
     await this.syncConversationSnapshot(session, { chatId });
-    const payload = await this.messageService.getMessages(session.openwaSessionId, { chatId, limit });
+    const safeLimit = Number.isFinite(limit)
+      ? Math.min(Math.max(Math.trunc(limit), 1), OmegaAdminService.WORKSPACE_HISTORY_MAX)
+      : OmegaAdminService.WORKSPACE_HISTORY_PAGE_SIZE;
+    const [storedResult, liveResult] = await Promise.allSettled([
+      this.loadStoredWorkspaceHistory(session.openwaSessionId, chatId, safeLimit),
+      this.messageService.getChatHistory(session.openwaSessionId, chatId, safeLimit, false),
+    ]);
+
+    if (storedResult.status === 'rejected' && liveResult.status === 'rejected') {
+      throw liveResult.reason;
+    }
+
+    const storedPayload =
+      storedResult.status === 'fulfilled'
+        ? storedResult.value
+        : { messages: [] as WorkspaceHistoryMessage[], total: 0 };
+    const liveMessages = liveResult.status === 'fulfilled' ? liveResult.value.map(normalizeLiveWorkspaceMessage) : [];
+    const messages = mergeWorkspaceMessageHistory(liveMessages, storedPayload.messages, safeLimit);
     await this.syncConversationTimelineFromMessages(session, chatId);
-    return payload;
+    return {
+      messages,
+      total: Math.max(storedPayload.total, liveMessages.length, messages.length),
+    };
+  }
+
+  private async loadStoredWorkspaceHistory(sessionId: string, chatId: string, limit: number) {
+    const messages: WorkspaceHistoryMessage[] = [];
+    let total = 0;
+
+    for (let offset = 0; offset < limit; offset += OmegaAdminService.WORKSPACE_HISTORY_PAGE_SIZE) {
+      const page = await this.messageService.getMessages(sessionId, {
+        chatId,
+        limit: Math.min(OmegaAdminService.WORKSPACE_HISTORY_PAGE_SIZE, limit - offset),
+        offset,
+      });
+      messages.push(...page.messages);
+      total = page.total;
+
+      if (page.messages.length === 0 || messages.length >= total) break;
+    }
+
+    return { messages: messages.slice(0, limit), total };
   }
 
   async markWorkspaceChatRead(user: OmegaUser, workspaceSessionId: string, chatId: string) {

@@ -5,10 +5,11 @@
 import { Chat, Client, Message } from 'whatsapp-web.js';
 
 /**
- * A WhatsApp ID (Wid) as serialized by whatsapp-web.js, e.g. `{ _serialized: '120363xxx@g.us' }`.
+ * A WhatsApp ID (Wid) under either serialization field used by supported WA Web builds.
  */
 export interface SerializedWid {
   _serialized?: string;
+  $1?: string;
 }
 
 /**

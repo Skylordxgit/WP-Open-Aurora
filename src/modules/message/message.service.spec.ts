@@ -61,6 +61,7 @@ describe('MessageService', () => {
     repository = {
       create: jest.fn().mockImplementation((data: Partial<Message>) => ({ id: 'msg-uuid-1', ...data }) as Message),
       save: jest.fn().mockImplementation(msg => Promise.resolve(msg)),
+      find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       createQueryBuilder: jest.fn(),
@@ -210,14 +211,48 @@ describe('MessageService', () => {
         continue: true,
         data: { input: { chatId: '152695264563252@lid', text: 'hello' } },
       });
-      (repository.findOne as jest.Mock).mockResolvedValueOnce({
-        metadata: { senderPhone: '628777888999' },
-        createdAt: new Date(),
-      });
+      (repository.find as jest.Mock).mockResolvedValueOnce([
+        {
+          metadata: { senderPhone: '628777888999' },
+          createdAt: new Date(),
+        },
+      ]);
       mockEngine.getNumberId.mockResolvedValueOnce('628777888999@c.us');
 
       await service.sendText('sess-1', { chatId: '152695264563252@lid', text: 'hello' });
 
+      expect(mockEngine.resolveContactPhone).not.toHaveBeenCalled();
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628777888999@c.us', 'hello');
+    });
+
+    it('reuses the latest stored canonical address when senderPhone metadata is missing', async () => {
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({
+        continue: true,
+        data: { input: { chatId: '152695264563252@lid', text: 'hello' } },
+      });
+      (repository.find as jest.Mock).mockResolvedValueOnce([
+        {
+          from: '628123456789@c.us',
+          to: '152695264563252@lid',
+          metadata: {},
+          createdAt: new Date(),
+        },
+        {
+          from: '152695264563252@lid',
+          to: '628777888999@c.us',
+          metadata: {},
+          createdAt: new Date(Date.now() - 1000),
+        },
+      ]);
+      mockEngine.getNumberId.mockResolvedValueOnce('628777888999@c.us');
+
+      await service.sendText('sess-1', { chatId: '152695264563252@lid', text: 'hello' });
+
+      expect(repository.find).toHaveBeenCalledWith({
+        where: { sessionId: 'sess-1', chatId: '152695264563252@lid' },
+        order: { createdAt: 'DESC' },
+        take: 25,
+      });
       expect(mockEngine.resolveContactPhone).not.toHaveBeenCalled();
       expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628777888999@c.us', 'hello');
     });
@@ -619,13 +654,13 @@ describe('MessageService', () => {
     it('retries history with the canonical phone chat when a privacy-id fetch fails', async () => {
       const liveHistory = [{ id: 'm1', body: 'restored', fromMe: true }];
       mockEngine.getChatHistory.mockRejectedValueOnce(new Error('Chat not found')).mockResolvedValueOnce(liveHistory);
-      mockEngine.resolveContactPhone.mockResolvedValueOnce('628123456789');
-      mockEngine.getNumberId.mockResolvedValueOnce('628123456789@c.us');
+      mockEngine.resolveContactPhone.mockResolvedValueOnce('628777888999');
+      mockEngine.getNumberId.mockResolvedValueOnce('628777888999@c.us');
 
       await expect(service.getChatHistory('sess-1', '152695264563252@lid', 100, true)).resolves.toBe(liveHistory);
       expect(mockEngine.resolveContactPhone).toHaveBeenCalledWith('152695264563252@lid');
-      expect(mockEngine.getNumberId).toHaveBeenCalledWith('628123456789');
-      expect(mockEngine.getChatHistory).toHaveBeenLastCalledWith('628123456789@c.us', 100, true);
+      expect(mockEngine.getNumberId).toHaveBeenCalledWith('628777888999');
+      expect(mockEngine.getChatHistory).toHaveBeenLastCalledWith('628777888999@c.us', 100, true);
     });
 
     it('uses a verified contact-cache number when direct privacy-id resolution is unavailable', async () => {

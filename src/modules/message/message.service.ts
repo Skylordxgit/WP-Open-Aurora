@@ -47,7 +47,7 @@ export class MessageService {
     const finalDto = (hookData as { input: SendTextMessageDto }).input;
 
     const engine = this.getEngine(sessionId);
-    const sendChatId = await this.resolveSendChatId(engine, finalDto.chatId);
+    const sendChatId = await this.resolveSendChatId(sessionId, engine, finalDto.chatId);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -121,7 +121,7 @@ export class MessageService {
 
   async sendImage(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
-    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
+    const sendChatId = await this.resolveSendChatId(sessionId, engine, dto.chatId);
     const media = this.buildMediaInput(dto);
 
     // Save message as pending BEFORE sending
@@ -156,7 +156,7 @@ export class MessageService {
 
   async sendVideo(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
-    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
+    const sendChatId = await this.resolveSendChatId(sessionId, engine, dto.chatId);
     const media = this.buildMediaInput(dto);
 
     // Save message as pending BEFORE sending
@@ -191,7 +191,7 @@ export class MessageService {
 
   async sendAudio(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
-    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
+    const sendChatId = await this.resolveSendChatId(sessionId, engine, dto.chatId);
     const media = this.buildMediaInput(dto);
 
     // Save message as pending BEFORE sending
@@ -225,7 +225,7 @@ export class MessageService {
 
   async sendDocument(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
-    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
+    const sendChatId = await this.resolveSendChatId(sessionId, engine, dto.chatId);
     const media = this.buildMediaInput(dto);
 
     // Save message as pending BEFORE sending
@@ -296,7 +296,7 @@ export class MessageService {
     dto: { chatId: string; latitude: number; longitude: number; description?: string; address?: string },
   ): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
-    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
+    const sendChatId = await this.resolveSendChatId(sessionId, engine, dto.chatId);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -335,7 +335,7 @@ export class MessageService {
     dto: { chatId: string; contactName: string; contactNumber: string },
   ): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
-    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
+    const sendChatId = await this.resolveSendChatId(sessionId, engine, dto.chatId);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -369,7 +369,7 @@ export class MessageService {
 
   async sendSticker(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
-    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
+    const sendChatId = await this.resolveSendChatId(sessionId, engine, dto.chatId);
     const media = this.buildMediaInput(dto);
 
     // Save message as pending BEFORE sending
@@ -406,7 +406,7 @@ export class MessageService {
     dto: { chatId: string; quotedMessageId: string; text: string },
   ): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
-    const sendChatId = await this.resolveSendChatId(engine, dto.chatId);
+    const sendChatId = await this.resolveSendChatId(sessionId, engine, dto.chatId);
 
     // Resolve the quoted message body (best-effort) so the dashboard can render the reply preview.
     let quotedBody = '';
@@ -454,8 +454,8 @@ export class MessageService {
     dto: { fromChatId: string; toChatId: string; messageId: string },
   ): Promise<MessageResponseDto> {
     const engine = this.getEngine(sessionId);
-    const fromChatId = await this.resolveSendChatId(engine, dto.fromChatId);
-    const toChatId = await this.resolveSendChatId(engine, dto.toChatId);
+    const fromChatId = await this.resolveSendChatId(sessionId, engine, dto.fromChatId);
+    const toChatId = await this.resolveSendChatId(sessionId, engine, dto.toChatId);
 
     // Save message as pending BEFORE sending
     const message = await this.saveOutgoingMessage(sessionId, {
@@ -543,6 +543,8 @@ export class MessageService {
 
   /** Maximum messages a single getChatHistory call may request from the engine. */
   private static readonly MAX_CHAT_HISTORY_LIMIT = 500;
+  /** Recent persisted rows inspected when recovering a canonical address for a privacy-id chat. */
+  private static readonly CONTACT_ADDRESS_SCAN_LIMIT = 25;
 
   /**
    * Fetch chat history live from WhatsApp (bypasses local DB).
@@ -564,7 +566,7 @@ export class MessageService {
       // Privacy IDs may appear in getChats even when history is stored under the canonical phone JID.
       // Resolve and retry through engine-neutral methods; the adapter remains untouched.
       try {
-        const phone = await this.resolveChatPhone(engine, chatId);
+        const phone = await this.resolveChatPhone(sessionId, engine, chatId);
         const canonicalChatId = phone ? await engine.getNumberId(phone) : null;
         if (canonicalChatId && canonicalChatId !== chatId) {
           return await engine.getChatHistory(canonicalChatId, safeLimit, includeMedia);
@@ -576,27 +578,43 @@ export class MessageService {
     }
   }
 
-  private async resolveChatPhone(engine: IWhatsAppEngine, chatId: string): Promise<string | null> {
+  private async resolveChatPhone(sessionId: string, engine: IWhatsAppEngine, chatId: string): Promise<string | null> {
     const privacyIdDigits = chatId.endsWith('@lid') ? chatId.split('@')[0].replace(/\D/g, '') : '';
+    const sessionPhone = ((await this.sessionService.findOne(sessionId).catch(() => null))?.phone ?? '').replace(
+      /\D/g,
+      '',
+    );
     const normalizeCandidate = (value?: string | null): string | null => {
       const digits = value?.replace(/\D/g, '') || '';
-      return digits && digits !== privacyIdDigits ? digits : null;
+      if (!digits || digits === privacyIdDigits) {
+        return null;
+      }
+      return digits === sessionPhone ? null : digits;
     };
 
-    // Fast path: reuse the latest persisted sender-phone mapping for this chat before asking the live
-    // engine to re-scan WhatsApp state. This avoids a slow resolveContactPhone round-trip for chats we
-    // have already seen or synchronized once.
+    // Fast path: scan recent rows from this session before asking the live engine to re-scan
+    // WhatsApp state. A failed outgoing row can be newer than the inbound row that carries the
+    // canonical contact address, so inspecting only the latest message is not sufficient.
     try {
-      const lastStoredMessage = await this.messageRepository.findOne({
-        where: { chatId },
+      const storedMessages = await this.messageRepository.find({
+        where: { sessionId, chatId },
         order: { createdAt: 'DESC' },
+        take: MessageService.CONTACT_ADDRESS_SCAN_LIMIT,
       });
-      const senderPhone = lastStoredMessage?.metadata?.senderPhone;
-      const storedPhone =
-        typeof senderPhone === 'string' || typeof senderPhone === 'number'
-          ? normalizeCandidate(String(senderPhone))
-          : null;
-      if (storedPhone) return storedPhone;
+      for (const storedMessage of storedMessages) {
+        const senderPhone = storedMessage.metadata?.senderPhone;
+        const candidates = [
+          typeof senderPhone === 'string' || typeof senderPhone === 'number' ? String(senderPhone) : null,
+          typeof storedMessage.metadata?.author === 'string' ? storedMessage.metadata.author : null,
+          storedMessage.from,
+          storedMessage.to,
+        ];
+
+        for (const candidate of candidates) {
+          const storedPhone = normalizeCandidate(candidate);
+          if (storedPhone) return storedPhone;
+        }
+      }
     } catch {
       // Preserve the live engine resolution path below when the local cache lookup fails.
     }
@@ -645,10 +663,10 @@ export class MessageService {
     return engine;
   }
 
-  private async resolveSendChatId(engine: IWhatsAppEngine, chatId: string): Promise<string> {
+  private async resolveSendChatId(sessionId: string, engine: IWhatsAppEngine, chatId: string): Promise<string> {
     if (!chatId.endsWith('@lid')) return chatId;
 
-    const phone = await this.resolveChatPhone(engine, chatId);
+    const phone = await this.resolveChatPhone(sessionId, engine, chatId);
     if (!phone) return chatId;
 
     try {

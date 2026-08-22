@@ -25,6 +25,19 @@ function run(root = ROOT) {
     return 1;
   }
 
+  const messageIdPatcher = path.join(root, 'scripts', 'patch-wwebjs-201832.js');
+  if (
+    fs.existsSync(messageIdPatcher) &&
+    !runStep(
+      process.execPath,
+      [messageIdPatcher, '--best-effort'],
+      { cwd: root, stdio: 'inherit' },
+      'whatsapp-web.js message-id repair',
+    )
+  ) {
+    return 1;
+  }
+
   const readySyncPatcher = path.join(root, 'scripts', 'patch-wwebjs-ready-sync.js');
   if (
     fs.existsSync(readySyncPatcher) &&

@@ -64,7 +64,7 @@ function getUserPortalSession() {
   return sessionStorage.getItem('omega_admin_token');
 }
 
-function getChatKey(chat: OmegaWorkspaceChat) {
+function getChatKey(chat: Pick<OmegaWorkspaceChat, 'sessionId' | 'id'>) {
   return `${chat.sessionId}:${chat.id}`;
 }
 
@@ -140,6 +140,10 @@ export function ClientApp({ standalone = true, onLoggedOut }: { standalone?: boo
   const languageMenuRef = useRef<HTMLDivElement>(null);
   const inboxControlsRef = useRef<HTMLDivElement>(null);
   const profileMenuRef = useRef<HTMLDivElement>(null);
+  const messageStreamRef = useRef<HTMLDivElement>(null);
+  const messageRequestRef = useRef(0);
+  const messageLoadInFlightRef = useRef(false);
+  const shouldScrollToBottomRef = useRef(false);
 
   useEffect(() => {
     if (!user) {
@@ -333,6 +337,8 @@ export function ClientApp({ standalone = true, onLoggedOut }: { standalone?: boo
 
   useEffect(() => {
     if (!workspaceChats.length) {
+      messageRequestRef.current += 1;
+      messageLoadInFlightRef.current = false;
       setSelectedChatKey('');
       setMessages([]);
       return;
@@ -348,13 +354,23 @@ export function ClientApp({ standalone = true, onLoggedOut }: { standalone?: boo
     workspaceChats.find(chat => getChatKey(chat) === selectedChatKey) ??
     filteredChats.find(chat => getChatKey(chat) === selectedChatKey) ??
     null;
+  const activeChatId = activeChat?.id ?? '';
+  const activeChatSessionId = activeChat?.sessionId ?? '';
 
-  const loadMessages = useCallback(async (chat: OmegaWorkspaceChat) => {
-    setLoadingMessages(true);
+  const loadMessages = useCallback(async (chat: Pick<OmegaWorkspaceChat, 'sessionId' | 'id'>, silent = false) => {
+    if (silent && messageLoadInFlightRef.current) return;
+
+    const requestId = ++messageRequestRef.current;
+    messageLoadInFlightRef.current = true;
+    const stream = messageStreamRef.current;
+    shouldScrollToBottomRef.current =
+      !silent || !stream || stream.scrollHeight - stream.scrollTop - stream.clientHeight < 120;
+    if (!silent) setLoadingMessages(true);
 
     try {
       await omegaWorkspaceMarkRead(chat.sessionId, chat.id).catch(() => undefined);
-      const response = await omegaWorkspaceMessages(chat.sessionId, chat.id, 100);
+      const response = await omegaWorkspaceMessages(chat.sessionId, chat.id, 500);
+      if (requestId !== messageRequestRef.current) return;
       setMessages([...response.messages].reverse().map(message => ({ ...message, type: asMessageType(message.type) })));
       setWorkspace(current =>
         current
@@ -367,30 +383,48 @@ export function ClientApp({ standalone = true, onLoggedOut }: { standalone?: boo
           : current,
       );
     } catch (messageError) {
-      setMessages([]);
-      setError(messageError instanceof Error ? messageError.message : 'Unable to load messages');
+      if (requestId !== messageRequestRef.current) return;
+      if (!silent) {
+        setMessages([]);
+        setError(messageError instanceof Error ? messageError.message : 'Unable to load messages');
+      }
     } finally {
-      setLoadingMessages(false);
+      if (requestId === messageRequestRef.current) {
+        messageLoadInFlightRef.current = false;
+        if (!silent) setLoadingMessages(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    if (!activeChat) return;
+    if (!activeChatId || !activeChatSessionId) return;
     setError('');
-    void loadMessages(activeChat);
-  }, [activeChat, loadMessages]);
+    void loadMessages({ id: activeChatId, sessionId: activeChatSessionId });
+  }, [activeChatId, activeChatSessionId, loadMessages]);
 
   useEffect(() => {
-    if (!activeChat) return;
+    if (!activeChatId || !activeChatSessionId) return;
 
     const interval = window.setInterval(() => {
-      void loadMessages(activeChat);
+      void loadMessages({ id: activeChatId, sessionId: activeChatSessionId }, true);
     }, 5000);
 
     return () => {
       window.clearInterval(interval);
     };
-  }, [activeChat, loadMessages]);
+  }, [activeChatId, activeChatSessionId, loadMessages]);
+
+  useEffect(() => {
+    if (loadingMessages || !shouldScrollToBottomRef.current) return;
+    const stream = messageStreamRef.current;
+    if (!stream) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      stream.scrollTop = stream.scrollHeight;
+      shouldScrollToBottomRef.current = false;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [loadingMessages, messages, selectedChatKey]);
 
   const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -493,6 +527,7 @@ export function ClientApp({ standalone = true, onLoggedOut }: { standalone?: boo
     setIsSending(true);
     setError('');
     setMessageInput('');
+    shouldScrollToBottomRef.current = true;
     setMessages(current => [...current, optimisticMessage]);
 
     try {
@@ -1005,7 +1040,7 @@ export function ClientApp({ standalone = true, onLoggedOut }: { standalone?: boo
 
             {error && <div className="client-login-error">{error}</div>}
 
-            <div className="client-message-stream">
+            <div className="client-message-stream" ref={messageStreamRef}>
               {loadingMessages ? (
                 <div className="client-empty-thread">
                   <strong>{t('clientPortal.loadingMessages', { defaultValue: 'Loading messages...' })}</strong>

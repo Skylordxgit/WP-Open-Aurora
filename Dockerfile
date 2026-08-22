@@ -55,6 +55,7 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     dumb-init \
     gosu \
+    patch \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -70,11 +71,12 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Apply the upstream warm-session/message-bridge repair to the production dependency tree.
-COPY scripts/postinstall.js scripts/patch-wwebjs-ready-sync.js ./scripts/
+# Apply the upstream message-id and warm-session repairs to the production dependency tree.
+COPY scripts/postinstall.js scripts/patch-wwebjs-201832.js scripts/wwebjs-201832.patch scripts/patch-wwebjs-ready-sync.js ./scripts/
 
 # Install production dependencies only
 RUN npm ci --omit=dev \
+    && node scripts/patch-wwebjs-201832.js \
     && node scripts/patch-wwebjs-ready-sync.js \
     && npm cache clean --force
 

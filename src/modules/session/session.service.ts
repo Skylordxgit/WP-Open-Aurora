@@ -593,6 +593,14 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         this.eventsGateway.emitMessageRevoked(id, revokedPayload);
       },
       onMessageReaction: (event): void => {
+        if (!event.messageId) {
+          this.logger.warn('Ignoring message reaction without a resolvable message id', {
+            sessionId: id,
+            action: 'message_reaction_ignored',
+          });
+          return;
+        }
+
         this.logger.debug(`Message reaction received: ${event.messageId} -> ${event.reaction}`, {
           sessionId: id,
           messageId: event.messageId,

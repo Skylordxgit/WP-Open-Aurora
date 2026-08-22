@@ -43,6 +43,7 @@ import {
   BusinessClient,
   WwjsChannelData,
   GroupCreateResult,
+  SerializedWid,
 } from '../types/whatsapp-web-js.types';
 import { buildIncomingMessageBase } from './message-mapper';
 import { resolveWebVersionPin } from '../wa-web-version';
@@ -392,8 +393,9 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
 
     this.client.on('message_reaction', reaction => {
       try {
+        const msgId = reaction.msgId as unknown as SerializedWid;
         const event: ReactionEvent = {
-          messageId: reaction.msgId._serialized,
+          messageId: msgId?._serialized ?? msgId?.$1 ?? '',
           chatId: reaction.id.remote,
           reaction: reaction.reaction,
           senderId: reaction.senderId,
