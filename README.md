@@ -102,8 +102,8 @@ Built on a **pluggable architecture**, OpenWA lets you swap database engines (SQ
 # Clone and start
 git clone https://github.com/rmyndharis/OpenWA.git
 cd OpenWA
-cp .env.example .env
-# Set DATABASE_PASSWORD, EVOLUTION_GO_API_KEY, and EVOLUTION_GO_INSTANCE_TOKEN_SECRET in .env
+npm run env:generate
+# The ignored .env now contains strong, independent values for PostgreSQL and Evolution Go.
 docker compose -f docker-compose.dev.yml up -d
 
 # Access (the dashboard is bundled into the API image and served on the same port)

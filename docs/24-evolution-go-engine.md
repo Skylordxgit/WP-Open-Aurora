@@ -23,9 +23,9 @@ Evolution's `DATABASE_SAVE_MESSAGES=true` journal is a secondary transport diagn
 
 ## First Start
 
-1. Copy `.env.example` to `.env`.
-2. Set a strong hex `DATABASE_PASSWORD` so it is also safe inside a PostgreSQL DSN.
-3. Generate separate values for `EVOLUTION_GO_API_KEY` and `EVOLUTION_GO_INSTANCE_TOKEN_SECRET` with `openssl rand -hex 32`.
+1. Run `npm run env:generate` to create an ignored `.env` with three independent 256-bit secrets.
+2. For a VPS-specific environment, run `npm run env:generate -- .env .env.vps.example`.
+3. Keep `DATABASE_PASSWORD`, `EVOLUTION_GO_API_KEY`, and `EVOLUTION_GO_INSTANCE_TOKEN_SECRET` private and preserve them across restarts.
 4. Register the Evolution license once, then set the registered `EVOLUTION_OPERATOR_EMAIL` for headless activation.
 5. Run `docker compose up -d` and inspect `docker compose logs -f evolution-go openwa-api`.
 
