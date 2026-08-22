@@ -11,6 +11,7 @@ import {
   ReplyMessageDto,
   ForwardMessageDto,
   ReactMessageDto,
+  EditMessageDto,
   DeleteMessageDto,
 } from './dto/message-actions.dto';
 import { RequireRole } from '../auth/decorators/auth.decorators';
@@ -45,6 +46,16 @@ export class MessageController {
       limit: limit ? parseInt(limit, 10) : undefined,
       offset: offset ? parseInt(offset, 10) : undefined,
     });
+  }
+
+  @Get(':messageId/media')
+  @ApiOperation({ summary: 'Load permanently archived media for a stored message' })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiParam({ name: 'messageId', description: 'Aurora message row ID' })
+  @ApiResponse({ status: 200, description: 'Base64 encoded archived media' })
+  @ApiResponse({ status: 404, description: 'Message or archived media not found' })
+  async getArchivedMedia(@Param('sessionId') sessionId: string, @Param('messageId') messageId: string) {
+    return this.messageService.getArchivedMedia(sessionId, messageId);
   }
 
   @Post('send-text')
@@ -308,6 +319,17 @@ export class MessageController {
   }
 
   // ========== Delete Message ==========
+
+  @Post('edit')
+  @HttpCode(HttpStatus.OK)
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @ApiOperation({ summary: 'Edit an outgoing text message when supported by the active WhatsApp engine' })
+  @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  @ApiResponse({ status: 200, description: 'Message edited and durable history updated' })
+  async editMessage(@Param('sessionId') sessionId: string, @Body() dto: EditMessageDto): Promise<{ success: boolean }> {
+    await this.messageService.editMessage(sessionId, dto);
+    return { success: true };
+  }
 
   @Post('delete')
   @HttpCode(HttpStatus.OK)

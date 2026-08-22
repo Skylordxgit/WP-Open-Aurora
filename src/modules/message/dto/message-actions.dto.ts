@@ -116,3 +116,20 @@ export class DeleteMessageDto {
   @IsBoolean()
   forEveryone?: boolean;
 }
+
+export class EditMessageDto {
+  @ApiProperty()
+  @IsString()
+  @IsNotEmpty()
+  chatId: string;
+
+  @ApiProperty()
+  @IsString()
+  @IsNotEmpty()
+  messageId: string;
+
+  @ApiProperty({ description: 'Replacement text for a message sent by this account' })
+  @IsString()
+  @IsNotEmpty()
+  text: string;
+}

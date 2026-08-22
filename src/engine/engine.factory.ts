@@ -5,8 +5,10 @@ import { WhatsAppWebJsAdapter } from './adapters/whatsapp-web-js.adapter';
 import { PluginLoaderService, PluginType, IEnginePlugin, PluginManifest } from '../core/plugins';
 import { WhatsAppWebJsPlugin } from '../plugins/engines/whatsapp-web-js';
 import { BaileysPlugin } from '../plugins/engines/baileys';
+import { EvolutionGoPlugin } from '../plugins/engines/evolution-go';
 import { createLogger } from '../common/services/logger.service';
 import { BaileysMessageStoreService } from './adapters/baileys-message-store.service';
+import { EvolutionGoAdapter } from './adapters/evolution-go.adapter';
 
 export interface EngineCreateOptions {
   sessionId: string;
@@ -24,7 +26,7 @@ export class EngineFactory implements OnModuleInit {
     private readonly pluginLoader: PluginLoaderService,
     private readonly baileysMessageStore: BaileysMessageStoreService,
   ) {
-    this.engineType = this.configService.get<string>('engine.type') ?? 'whatsapp-web.js';
+    this.engineType = this.configService.get<string>('engine.type') ?? 'evolution-go';
   }
 
   async onModuleInit(): Promise<void> {
@@ -63,6 +65,21 @@ export class EngineFactory implements OnModuleInit {
     this.pluginLoader.registerBuiltInPlugin(
       baileysManifest,
       new BaileysPlugin(this.baileysMessageStore),
+      this.configService.get('engine') ?? {},
+    );
+
+    const evolutionManifest: PluginManifest = {
+      id: 'evolution-go',
+      name: 'Evolution Go Engine',
+      version: '0.7.2',
+      type: PluginType.ENGINE,
+      description: 'Evolution Go (whatsmeow) sidecar engine adapter',
+      main: 'index.ts',
+      provides: ['whatsapp-engine'],
+    };
+    this.pluginLoader.registerBuiltInPlugin(
+      evolutionManifest,
+      new EvolutionGoPlugin(),
       this.configService.get('engine') ?? {},
     );
 
@@ -117,7 +134,25 @@ export class EngineFactory implements OnModuleInit {
   }
 
   private createFallbackEngine(options: EngineCreateOptions): IWhatsAppEngine {
-    // Legacy direct creation (fallback)
+    // Never silently substitute a browser engine for a configured Evolution sidecar: doing so can
+    // create two competing WhatsApp clients and makes session ownership unpredictable.
+    if (this.engineType === 'evolution-go') {
+      return new EvolutionGoAdapter({
+        sessionId: options.sessionId,
+        proxyUrl: options.proxyUrl,
+        proxyType: options.proxyType,
+        baseUrl: this.configService.get<string>('engine.evolutionGo.baseUrl') ?? '',
+        apiKey: this.configService.get<string>('engine.evolutionGo.apiKey') ?? '',
+        instanceTokenSecret: this.configService.get<string>('engine.evolutionGo.instanceTokenSecret') ?? '',
+        requestTimeoutMs: this.configService.get<number>('engine.evolutionGo.requestTimeoutMs'),
+        healthCheckIntervalMs: this.configService.get<number>('engine.evolutionGo.healthCheckIntervalMs'),
+        websocketReconnectBaseDelayMs: this.configService.get<number>(
+          'engine.evolutionGo.websocketReconnectBaseDelayMs',
+        ),
+      });
+    }
+
+    // Legacy direct creation for whatsapp-web.js.
     return new WhatsAppWebJsAdapter({
       sessionId: options.sessionId,
       sessionDataPath: this.configService.get<string>('engine.sessionDataPath') ?? './data/sessions',

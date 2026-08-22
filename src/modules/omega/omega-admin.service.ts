@@ -52,6 +52,8 @@ import {
   normalizeLiveWorkspaceMessage,
   WorkspaceHistoryMessage,
 } from './workspace-message-history';
+import { EngineStatus } from '../../engine/interfaces/whatsapp-engine.interface';
+import { EngineNotReadyError, WHATSAPP_SESSION_DISCONNECTED_MESSAGE } from '../../common/errors/engine-not-ready.error';
 
 @Injectable()
 export class OmegaAdminService implements OnModuleInit {
@@ -783,6 +785,10 @@ export class OmegaAdminService implements OnModuleInit {
 
   async sendWorkspaceText(user: OmegaUser, workspaceSessionId: string, chatId: string, text: string) {
     const session = await this.getWorkspaceSessionForUser(user, workspaceSessionId);
+    const engine = this.sessionService.getEngine(session.openwaSessionId);
+    if (!engine || engine.getStatus() !== EngineStatus.READY) {
+      throw new EngineNotReadyError(WHATSAPP_SESSION_DISCONNECTED_MESSAGE);
+    }
     const conversation = await this.syncConversationSnapshot(session, { chatId });
     const hydratedConversation = await this.syncConversationTimelineFromMessages(session, chatId, conversation);
     const now = new Date();

@@ -23,6 +23,41 @@ import './App.css';
 import './omega/styles/omega.css';
 
 const LAZY_RETRY_KEY = 'aurorawa_lazy_retry_path';
+const LAZY_RETRY_PARAM = 'aurorawa-route-reload';
+const LAZY_IMPORT_TIMEOUT_MS = 15_000;
+
+async function importPageWithTimeout<TModule>(importer: () => Promise<TModule>): Promise<TModule> {
+  let timeoutId: number | undefined;
+
+  try {
+    return await Promise.race([
+      importer(),
+      new Promise<never>((_, reject) => {
+        timeoutId = window.setTimeout(() => {
+          reject(new Error('Timed out while loading the requested dashboard section'));
+        }, LAZY_IMPORT_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
+function clearLazyRetryState() {
+  sessionStorage.removeItem(LAZY_RETRY_KEY);
+
+  const currentUrl = new URL(window.location.href);
+  if (currentUrl.searchParams.has(LAZY_RETRY_PARAM)) {
+    currentUrl.searchParams.delete(LAZY_RETRY_PARAM);
+    window.history.replaceState(
+      window.history.state,
+      '',
+      `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`,
+    );
+  }
+}
 
 function clearStoredApiKey() {
   localStorage.removeItem('openwa_api_key');
@@ -43,16 +78,17 @@ function lazyPage<TModule, TProps>(
 ) {
   return lazy(async () => {
     try {
-      const module = await importer();
-      sessionStorage.removeItem(LAZY_RETRY_KEY);
+      const module = await importPageWithTimeout(importer);
+      clearLazyRetryState();
       return pickDefault(module);
     } catch (error) {
       const retryPath = sessionStorage.getItem(LAZY_RETRY_KEY);
       const currentPath = window.location.pathname;
       if (retryPath !== currentPath) {
         sessionStorage.setItem(LAZY_RETRY_KEY, currentPath);
-        window.location.reload();
-        return new Promise<never>(() => {});
+        const reloadUrl = new URL(window.location.href);
+        reloadUrl.searchParams.set(LAZY_RETRY_PARAM, Date.now().toString());
+        window.location.replace(reloadUrl.toString());
       }
       throw error;
     }

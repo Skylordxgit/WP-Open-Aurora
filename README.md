@@ -102,6 +102,8 @@ Built on a **pluggable architecture**, OpenWA lets you swap database engines (SQ
 # Clone and start
 git clone https://github.com/rmyndharis/OpenWA.git
 cd OpenWA
+cp .env.example .env
+# Set DATABASE_PASSWORD, EVOLUTION_GO_API_KEY, and EVOLUTION_GO_INSTANCE_TOKEN_SECRET in .env
 docker compose -f docker-compose.dev.yml up -d
 
 # Access (the dashboard is bundled into the API image and served on the same port)
@@ -447,7 +449,7 @@ curl -X POST http://localhost:2785/api/sessions/{sessionId}/webhooks \
 | **Runtime**   | Node.js 22 LTS          |
 | **Framework** | NestJS 11.x             |
 | **Language**  | TypeScript 5.x          |
-| **WA Engine** | whatsapp-web.js (default) / baileys — set `ENGINE_TYPE` |
+| **WA Engine** | Evolution Go 0.7.2 (primary) / whatsapp-web.js / Baileys |
 | **Database**  | SQLite / PostgreSQL     |
 | **Cache**     | Redis (optional)        |
 | **Storage**   | Local / S3 / MinIO      |

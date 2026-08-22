@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
-import { TarArchive } from 'archiver';
 import * as tar from 'tar-stream';
 import { createGunzip } from 'zlib';
 import { Readable, PassThrough } from 'stream';
@@ -156,6 +155,7 @@ export class StorageService {
   async createExportStream(): Promise<PassThrough> {
     const files = await this.listFiles();
     const output = new PassThrough();
+    const { TarArchive } = await import('archiver');
 
     const archive = new TarArchive({
       gzip: true,

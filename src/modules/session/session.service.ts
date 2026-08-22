@@ -10,7 +10,9 @@ import {
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, In, Not, IsNull, DataSource, MoreThan } from 'typeorm';
 import { Session, SessionStatus } from './entities/session.entity';
+import { ChatSnapshot } from './entities/chat-snapshot.entity';
 import { Message, MessageDirection, MessageStatus } from '../message/entities/message.entity';
+import { SavedContact } from '../contact/entities/saved-contact.entity';
 import { CreateSessionDto } from './dto';
 import { EngineFactory } from '../../engine/engine.factory';
 import {
@@ -18,6 +20,7 @@ import {
   EngineStatus,
   ChatSummary,
   ChatState,
+  Contact,
   DeliveryStatus,
   IncomingMessage,
 } from '../../engine/interfaces/whatsapp-engine.interface';
@@ -30,12 +33,14 @@ import {
   deliveryStatusToAck,
   ackStatusTransitionFrom,
 } from '../message/message-status.util';
+import { MediaArchiveService } from '../../common/media/media-archive.service';
 
 interface ReconnectState {
   attempts: number;
   timer: NodeJS.Timeout | null;
   maxAttempts: number;
   baseDelay: number;
+  autoReconnect: boolean;
 }
 
 @Injectable()
@@ -44,6 +49,8 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
   private static readonly CHAT_FETCH_TIMEOUT_MS = 15_000;
   private static readonly CHAT_FALLBACK_MESSAGE_SCAN = 5000;
   private static readonly CHAT_CACHE_TTL_MS = 5_000;
+  private static readonly MAX_RECONNECT_DELAY_MS = 5 * 60_000;
+  private static readonly DEFAULT_HISTORY_SYNC_LIMIT = 500;
 
   // In-memory map of active engine instances
   private engines: Map<string, IWhatsAppEngine> = new Map();
@@ -54,6 +61,8 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
   private static readonly LID_PHONE_CACHE_MAX = 5000;
   private readonly chatCache = new Map<string, { chats: ChatSummary[]; expiresAt: number }>();
   private readonly chatRefreshes = new Map<string, Promise<ChatSummary[]>>();
+  private readonly archiveSyncs = new Map<string, Promise<void>>();
+  private readonly messagePersistQueues = new Map<string, Promise<void>>();
   // Transient, human-readable reason for the most recent terminal engine failure,
   // keyed by session id. Surfaced on read so the dashboard can explain a FAILED
   // status; cleared when the session re-initializes or becomes ready.
@@ -73,12 +82,17 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     private readonly sessionRepository: Repository<Session>,
     @InjectRepository(Message, 'data')
     private readonly messageRepository: Repository<Message>,
+    @InjectRepository(SavedContact, 'data')
+    private readonly savedContactRepository: Repository<SavedContact>,
+    @InjectRepository(ChatSnapshot, 'data')
+    private readonly chatSnapshotRepository: Repository<ChatSnapshot>,
     @InjectDataSource('data')
     private readonly dataSource: DataSource,
     private readonly engineFactory: EngineFactory,
     private readonly eventsGateway: EventsGateway,
     private readonly webhookService: WebhookService,
     private readonly hookManager: HookManager,
+    private readonly mediaArchiveService: MediaArchiveService,
   ) {}
 
   /**
@@ -312,15 +326,36 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     const config = session.config as {
       maxReconnectAttempts?: number;
       reconnectBaseDelay?: number;
+      autoReconnect?: boolean;
     } | null;
+    const envMaxAttempts = Number(
+      process.env.SESSION_MAX_RECONNECT_ATTEMPTS ?? process.env.WA_MAX_RECONNECT_ATTEMPTS ?? 0,
+    );
+    const configuredMaxAttempts = config?.maxReconnectAttempts ?? envMaxAttempts;
+    const configuredBaseDelay =
+      config?.reconnectBaseDelay ??
+      Number(process.env.SESSION_RECONNECT_BASE_DELAY ?? process.env.WA_RECONNECT_INTERVAL ?? 5000);
     this.reconnectStates.set(id, {
       attempts: 0,
       timer: null,
-      maxAttempts: config?.maxReconnectAttempts ?? 5,
-      baseDelay: config?.reconnectBaseDelay ?? 5000,
+      // A value <= 0 means unlimited retries. Explicit positive per-session limits remain supported.
+      maxAttempts:
+        Number.isFinite(configuredMaxAttempts) && configuredMaxAttempts > 0
+          ? Math.trunc(configuredMaxAttempts)
+          : Number.POSITIVE_INFINITY,
+      baseDelay:
+        Number.isFinite(configuredBaseDelay) && configuredBaseDelay > 0
+          ? Math.max(Math.trunc(configuredBaseDelay), 1000)
+          : 5000,
+      autoReconnect: config?.autoReconnect !== false,
     });
 
-    await this.initializeEngine(id, session);
+    try {
+      await this.initializeEngine(id, session);
+    } catch (error) {
+      await this.cleanupFailedEngine(id);
+      throw error;
+    }
     return this.findOne(id);
   }
 
@@ -337,6 +372,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       proxyType: session.proxyType || undefined,
     });
     this.engines.set(id, engine);
+    const isCurrentEngine = (): boolean => this.isCurrentEngine(id, engine);
     // Clear any prior failure reason before a fresh start.
     this.sessionErrors.delete(id);
 
@@ -347,6 +383,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
 
     await engine.initialize({
       onQRCode: (): void => {
+        if (!isCurrentEngine()) return;
         this.logger.log('QR code generated', {
           sessionId: id,
           action: 'qr_generated',
@@ -365,17 +402,22 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         void this.updateStatus(id, SessionStatus.QR_READY);
       },
       onReady: (phone: string, pushName: string): void => {
-        this.logger.log(`Session ready: ${phone}`, {
+        if (!isCurrentEngine()) return;
+        // Evolution's status endpoint does not expose its private myJid field. Preserve Aurora's
+        // last known identity when a warm reattach reports readiness before a Connected event.
+        const resolvedPhone = phone || session.phone || '';
+        const resolvedPushName = pushName || session.pushName || '';
+        this.logger.log(`Session ready: ${resolvedPhone}`, {
           sessionId: id,
-          phone,
-          pushName,
+          phone: resolvedPhone,
+          pushName: resolvedPushName,
           action: 'ready',
         });
 
         // Execute hook for ready event
         void this.hookManager.execute(
           'session:ready',
-          { phone, pushName },
+          { phone: resolvedPhone, pushName: resolvedPushName },
           {
             sessionId: id,
             source: 'Engine',
@@ -385,19 +427,32 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         // Reset reconnect attempts and clear any stale failure reason on success
         const reconnectState = this.reconnectStates.get(id);
         if (reconnectState) {
+          if (reconnectState.timer) {
+            clearTimeout(reconnectState.timer);
+            reconnectState.timer = null;
+          }
           reconnectState.attempts = 0;
         }
         this.sessionErrors.delete(id);
 
-        void this.sessionRepository.update(id, {
-          status: SessionStatus.READY,
-          phone,
-          pushName,
-          connectedAt: new Date(),
-          lastActiveAt: new Date(),
-        });
+        void this.sessionRepository
+          .update(id, {
+            status: SessionStatus.READY,
+            phone: resolvedPhone,
+            pushName: resolvedPushName,
+            connectedAt: new Date(),
+            lastActiveAt: new Date(),
+          })
+          .then(() => {
+            if (isCurrentEngine()) return this.startArchiveSync(id, engine);
+            return undefined;
+          })
+          .catch(error => {
+            this.logger.error(`Failed to finalize ready session ${id}`, String(error));
+          });
       },
       onMessage: (message): void => {
+        if (!isCurrentEngine()) return;
         // Status/Story posts arrive via the inbound path for some engines; don't persist or webhook them.
         // Mirrors the isStatusBroadcast guard in onMessageCreate below.
         if (message.isStatusBroadcast) {
@@ -421,7 +476,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
             source: 'Engine',
           })
           .then(async ({ continue: shouldContinue, data: finalMessage }) => {
-            if (!shouldContinue) {
+            if (!shouldContinue || !isCurrentEngine()) {
               // Plugin stopped processing (e.g., auto-reply handled it)
               return;
             }
@@ -436,25 +491,11 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
               incoming.senderPhone = await this.resolveSenderPhone(id, incoming.author ?? incoming.from);
             }
 
-            const metadata = this.buildStoredMessageMetadata(incoming);
+            // Commit first, then publish. A browser refresh or websocket reconnect can now always
+            // reconstruct the same message from the database.
+            await this.persistMessages(id, [incoming], undefined, true);
 
-            const dbMessage = this.messageRepository.create({
-              sessionId: id,
-              waMessageId: incoming.id,
-              chatId: incoming.chatId,
-              from: incoming.from,
-              to: incoming.to,
-              body: incoming.body,
-              type: incoming.type,
-              direction: incoming.fromMe ? MessageDirection.OUTGOING : MessageDirection.INCOMING,
-              timestamp: incoming.timestamp,
-              status: MessageStatus.SENT,
-              metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-            });
-
-            void this.messageRepository.save(dbMessage).catch(err => {
-              this.logger.error(`Failed to save incoming message ${incoming.id} to database`, String(err));
-            });
+            if (!isCurrentEngine()) return;
 
             // Dispatch to webhooks with potentially modified message
             void this.webhookService.dispatch(id, 'message.received', finalMessage);
@@ -464,6 +505,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
           .catch(err => this.logger.error(`onMessage handler failed for ${id}`, String(err)));
       },
       onMessageCreate: (message): void => {
+        if (!isCurrentEngine()) return;
         // `message_create` fires for every message the account creates, including sends composed on a
         // linked phone — which the `message`/`onMessage` event never delivers. Incoming messages are
         // already handled by `onMessage`, so only outgoing (`fromMe`) ones produce `message.sent` here.
@@ -494,7 +536,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
             source: 'Engine',
           })
           .then(({ continue: shouldContinue, data: finalMessage }) => {
-            if (!shouldContinue) {
+            if (!shouldContinue || !isCurrentEngine()) {
               return;
             }
 
@@ -510,6 +552,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
           .catch(err => this.logger.error(`onMessageCreate handler failed for ${id}`, String(err)));
       },
       onMessageAck: (messageId, status: DeliveryStatus): void => {
+        if (!isCurrentEngine()) return;
         this.logger.debug(`Message ack: ${messageId} -> ${status}`, {
           sessionId: id,
           messageId,
@@ -571,6 +614,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         }
       },
       onMessageRevoked: (message): void => {
+        if (!isCurrentEngine()) return;
         this.logger.debug(`Message revoked: ${message.id}`, {
           sessionId: id,
           messageId: message.id,
@@ -593,6 +637,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         this.eventsGateway.emitMessageRevoked(id, revokedPayload);
       },
       onMessageReaction: (event): void => {
+        if (!isCurrentEngine()) return;
         if (!event.messageId) {
           this.logger.warn('Ignoring message reaction without a resolvable message id', {
             sessionId: id,
@@ -630,7 +675,45 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
             this.logger.error(`Failed to update message reaction: ${event.messageId}`, String(err));
           });
       },
+      onMessageEdited: (event): void => {
+        if (!isCurrentEngine()) return;
+        void this.messageRepository
+          .findOne({ where: { sessionId: id, waMessageId: event.messageId } })
+          .then(async message => {
+            if (!message) return;
+            message.body = event.body;
+            message.type = event.type;
+            message.metadata = {
+              ...(message.metadata || {}),
+              editedAt: new Date(event.timestamp * 1000).toISOString(),
+            };
+            await this.messageRepository.save(message);
+
+            const payload = { ...event, id: event.messageId };
+            this.eventsGateway.emitMessageEdited(id, payload);
+            await this.webhookService.dispatch(id, 'message.edited', payload);
+          })
+          .catch(err => {
+            this.logger.error(`Failed to persist message edit: ${event.messageId}`, String(err));
+          });
+      },
+      onHistorySync: (messages): void => {
+        if (!isCurrentEngine() || messages.length === 0) return;
+        void this.persistHistory(id, messages).catch(error => {
+          this.logger.error(`Failed to persist Evolution history sync for ${id}`, String(error));
+        });
+      },
+      onContactsSync: (contacts): void => {
+        if (!isCurrentEngine() || contacts.length === 0) return;
+        void this.persistSessionContacts(id, contacts).catch(error => {
+          this.logger.error(`Failed to persist Evolution contact sync for ${id}`, String(error));
+        });
+      },
       onDisconnected: (reason: string): void => {
+        if (!isCurrentEngine()) {
+          return;
+        }
+
         this.logger.warn(`Session disconnected: ${reason}`, {
           sessionId: id,
           reason,
@@ -653,6 +736,10 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         this.scheduleReconnect(id, session);
       },
       onStateChanged: (engineState: EngineStatus): void => {
+        if (!isCurrentEngine()) return;
+        // FAILED is classified by onError below. Persisting it here as well can race a recoverable
+        // error's DISCONNECTED write and leave a reconnecting session incorrectly marked terminal.
+        if (engineState === EngineStatus.FAILED) return;
         const statusMap: Record<EngineStatus, SessionStatus> = {
           [EngineStatus.DISCONNECTED]: SessionStatus.DISCONNECTED,
           [EngineStatus.INITIALIZING]: SessionStatus.INITIALIZING,
@@ -667,16 +754,12 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         }
       },
       onError: (reason: string): void => {
+        if (!isCurrentEngine()) return;
         this.logger.error(`Session engine failed: ${reason}`, undefined, {
           sessionId: id,
           reason,
           action: 'engine_error',
         });
-
-        // Remember the reason so findOne/findAll can surface it to the dashboard,
-        // then persist the FAILED status. This is terminal — no reconnect is
-        // scheduled (unlike onDisconnected), since re-scanning is required.
-        this.sessionErrors.set(id, reason);
 
         void this.hookManager.execute(
           'session:error',
@@ -687,14 +770,37 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
           },
         );
 
-        void this.updateStatus(id, SessionStatus.FAILED);
+        if (this.isTerminalAuthenticationError(reason)) {
+          // Invalid/removed credentials require a new QR scan; retrying the same LocalAuth data
+          // indefinitely cannot recover this state.
+          this.sessionErrors.set(id, reason);
+          void this.updateStatus(id, SessionStatus.FAILED);
+          return;
+        }
+
+        // Browser, page bridge, and synchronization failures are recoverable. Preserve LocalAuth
+        // and keep retrying instead of permanently suspending a previously linked session.
+        this.sessionErrors.delete(id);
+        void this.updateStatus(id, SessionStatus.DISCONNECTED);
+        this.scheduleReconnect(id, session);
       },
     });
   }
 
+  private isCurrentEngine(sessionId: string, engine: IWhatsAppEngine): boolean {
+    return !this.stoppingSessions.has(sessionId) && this.engines.get(sessionId) === engine;
+  }
+
+  private async cleanupFailedEngine(id: string): Promise<void> {
+    const failedEngine = this.engines.get(id);
+    if (!failedEngine) return;
+    this.engines.delete(id);
+    await this.destroyEngineSafely(id, failedEngine);
+  }
+
   private scheduleReconnect(id: string, session: Session): void {
     const state = this.reconnectStates.get(id);
-    if (!state) return;
+    if (!state || !state.autoReconnect || state.timer || this.stoppingSessions.has(id)) return;
 
     if (state.attempts >= state.maxAttempts) {
       this.logger.error(`Max reconnect attempts reached for session: ${session.name}`, undefined, {
@@ -710,20 +816,23 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     }
 
     // Exponential backoff: baseDelay * 2^attempts (with jitter)
-    const delay = state.baseDelay * Math.pow(2, state.attempts) + Math.random() * 1000;
+    const exponentialDelay = state.baseDelay * Math.pow(2, Math.min(state.attempts, 16));
+    const delay = Math.min(exponentialDelay, SessionService.MAX_RECONNECT_DELAY_MS) + Math.random() * 1000;
     state.attempts++;
 
-    this.logger.log(
-      `Scheduling reconnect attempt ${state.attempts}/${state.maxAttempts} in ${Math.round(delay / 1000)}s`,
-      {
-        sessionId: id,
-        attempt: state.attempts,
-        delayMs: delay,
-        action: 'reconnect_scheduled',
-      },
-    );
+    const attemptLabel = Number.isFinite(state.maxAttempts)
+      ? `${state.attempts}/${state.maxAttempts}`
+      : `${state.attempts}`;
+
+    this.logger.log(`Scheduling reconnect attempt ${attemptLabel} in ${Math.round(delay / 1000)}s`, {
+      sessionId: id,
+      attempt: state.attempts,
+      delayMs: delay,
+      action: 'reconnect_scheduled',
+    });
 
     state.timer = setTimeout(() => {
+      state.timer = null;
       void this.executeReconnect(id, session, state);
     }, delay);
   }
@@ -755,6 +864,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         return;
       }
     } catch (error: unknown) {
+      await this.cleanupFailedEngine(id);
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       this.logger.error(`Reconnect attempt ${state.attempts} failed`, errorMessage, {
         sessionId: id,
@@ -763,6 +873,10 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       // Schedule another attempt
       this.scheduleReconnect(id, session);
     }
+  }
+
+  private isTerminalAuthenticationError(reason: string): boolean {
+    return /auth(?:entication)? failed|logged out|invalid.*session|session.*invalid/i.test(reason);
   }
 
   private cancelReconnect(id: string): void {
@@ -845,7 +959,15 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
 
   private buildStoredMessageMetadata(message: IncomingMessage): Record<string, unknown> {
     const metadata: Record<string, unknown> = {};
-    if (message.media) metadata.media = message.media;
+    if (message.media) {
+      metadata.media = message.media.storagePath
+        ? {
+            mimetype: message.media.mimetype,
+            filename: message.media.filename,
+            archived: true,
+          }
+        : message.media;
+    }
     if (message.quotedMessage) metadata.quotedMessage = message.quotedMessage;
     if (message.location) metadata.location = message.location;
     if (message.contact) metadata.contact = message.contact;
@@ -854,11 +976,380 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     return metadata;
   }
 
+  /**
+   * Permanently store history returned by the engine. Repeated syncs are idempotent by WhatsApp
+   * message id, and a later media-enabled fetch enriches the existing row instead of duplicating it.
+   */
+  async persistHistory(
+    sessionId: string,
+    messages: IncomingMessage[],
+    chatIdOverride?: string,
+  ): Promise<IncomingMessage[]> {
+    const normalized = messages
+      .filter(message => !message.isStatusBroadcast)
+      .map(message => (chatIdOverride ? { ...message, chatId: chatIdOverride } : message));
+    await this.persistMessages(sessionId, normalized);
+    return normalized;
+  }
+
+  private async persistMessages(
+    sessionId: string,
+    messages: IncomingMessage[],
+    chatIdOverride?: string,
+    incrementUnread = false,
+  ): Promise<void> {
+    const previous = this.messagePersistQueues.get(sessionId) ?? Promise.resolve();
+    const queued = previous
+      .catch(() => undefined)
+      .then(() => this.persistMessagesNow(sessionId, messages, chatIdOverride, incrementUnread));
+    this.messagePersistQueues.set(sessionId, queued);
+    return queued.finally(() => {
+      if (this.messagePersistQueues.get(sessionId) === queued) this.messagePersistQueues.delete(sessionId);
+    });
+  }
+
+  private async persistMessagesNow(
+    sessionId: string,
+    messages: IncomingMessage[],
+    chatIdOverride?: string,
+    incrementUnread = false,
+  ): Promise<void> {
+    const normalized = messages
+      .filter(message => message.id && !message.isStatusBroadcast)
+      .map(message => (chatIdOverride ? { ...message, chatId: chatIdOverride } : message));
+    if (normalized.length === 0) return;
+
+    const messageIds = [...new Set(normalized.map(message => message.id))];
+    const existing = await this.messageRepository.find({
+      where: { sessionId, waMessageId: In(messageIds) },
+    });
+    const existingById = new Map(existing.map(message => [message.waMessageId, message]));
+    const rows: Message[] = [];
+
+    for (const original of normalized) {
+      const alreadyStored = existingById.get(original.id);
+      const incoming =
+        original.media && alreadyStored?.mediaPath
+          ? {
+              ...original,
+              media: {
+                ...original.media,
+                mimetype: alreadyStored.mediaMimetype || original.media.mimetype,
+                storagePath: alreadyStored.mediaPath,
+              },
+            }
+          : await this.mediaArchiveService.archiveMessage(sessionId, original);
+      const metadata = this.buildStoredMessageMetadata(incoming);
+      const stored = existingById.get(incoming.id);
+
+      if (stored) {
+        stored.chatId = incoming.chatId || stored.chatId;
+        stored.from = incoming.from || stored.from;
+        stored.to = incoming.to || stored.to;
+        stored.body = incoming.body || stored.body;
+        stored.type = incoming.type === 'unknown' ? stored.type : incoming.type;
+        stored.direction = incoming.fromMe ? MessageDirection.OUTGOING : MessageDirection.INCOMING;
+        stored.timestamp = incoming.timestamp || stored.timestamp;
+        stored.mediaPath = incoming.media?.storagePath || stored.mediaPath;
+        stored.mediaMimetype = incoming.media?.mimetype || stored.mediaMimetype;
+        if (![MessageStatus.DELIVERED, MessageStatus.READ].includes(stored.status)) {
+          stored.status = MessageStatus.SENT;
+        }
+        stored.metadata = { ...(stored.metadata || {}), ...metadata };
+        rows.push(stored);
+        continue;
+      }
+
+      const row = this.messageRepository.create({
+        sessionId,
+        waMessageId: incoming.id,
+        chatId: incoming.chatId,
+        from: incoming.from,
+        to: incoming.to,
+        body: incoming.body,
+        type: incoming.type,
+        direction: incoming.fromMe ? MessageDirection.OUTGOING : MessageDirection.INCOMING,
+        timestamp: incoming.timestamp,
+        mediaPath: incoming.media?.storagePath,
+        mediaMimetype: incoming.media?.mimetype,
+        status: MessageStatus.SENT,
+        metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+      });
+      rows.push(row);
+      existingById.set(incoming.id, row);
+    }
+
+    await this.messageRepository.save(rows);
+    try {
+      await this.persistMessageChatSnapshots(sessionId, normalized, incrementUnread);
+    } catch (error) {
+      // The message row is authoritative. A snapshot conflict must not suppress its websocket or
+      // webhook delivery; the next chat refresh will rebuild the summary.
+      this.logger.error(`Failed to update chat snapshot for session ${sessionId}`, String(error));
+    }
+  }
+
+  private async persistMessageChatSnapshots(
+    sessionId: string,
+    messages: IncomingMessage[],
+    incrementUnread: boolean,
+  ): Promise<void> {
+    const latestByChat = new Map<string, IncomingMessage>();
+    const unreadByChat = new Map<string, number>();
+    for (const message of messages) {
+      if (!message.chatId) continue;
+      const current = latestByChat.get(message.chatId);
+      if (!current || this.toTimestamp(message.timestamp) >= this.toTimestamp(current.timestamp)) {
+        latestByChat.set(message.chatId, message);
+      }
+      if (incrementUnread && !message.fromMe) {
+        unreadByChat.set(message.chatId, (unreadByChat.get(message.chatId) ?? 0) + 1);
+      }
+    }
+    const chatIds = [...latestByChat.keys()];
+    if (chatIds.length === 0) return;
+
+    const existing = await this.chatSnapshotRepository.find({
+      where: { sessionId, chatId: In(chatIds) },
+    });
+    const byChatId = new Map(existing.map(snapshot => [snapshot.chatId, snapshot]));
+    const snapshots: ChatSnapshot[] = [];
+
+    for (const [chatId, message] of latestByChat) {
+      const current = byChatId.get(chatId);
+      const metadata = this.buildStoredMessageMetadata(message) as {
+        senderPhone?: unknown;
+        contact?: { name?: unknown; pushName?: unknown };
+      };
+      const contactPhone = message.isGroup
+        ? null
+        : this.normalizeContactPhone(metadata.senderPhone, chatId) || this.phoneFromDirectChatId(chatId);
+      const contactName =
+        (typeof metadata.contact?.name === 'string' && metadata.contact.name.trim()) ||
+        (typeof metadata.contact?.pushName === 'string' && metadata.contact.pushName.trim()) ||
+        null;
+      const timestamp = this.toTimestamp(message.timestamp);
+      const snapshot =
+        current ??
+        this.chatSnapshotRepository.create({
+          sessionId,
+          chatId,
+          name: contactName || contactPhone || chatId,
+          isGroup: message.isGroup || chatId.endsWith('@g.us'),
+          unreadCount: 0,
+          timestamp,
+          lastMessage: null,
+          contactPhone,
+        });
+
+      if (contactName || !this.isUsefulChatName(snapshot.name, chatId)) {
+        snapshot.name = contactName || contactPhone || snapshot.name || chatId;
+      }
+      snapshot.isGroup = message.isGroup || chatId.endsWith('@g.us');
+      snapshot.contactPhone = snapshot.contactPhone || contactPhone;
+      snapshot.unreadCount = Math.max(0, snapshot.unreadCount || 0) + (unreadByChat.get(chatId) ?? 0);
+      if (timestamp >= this.toTimestamp(snapshot.timestamp)) {
+        snapshot.timestamp = timestamp;
+        snapshot.lastMessage = this.messagePreview(message);
+      }
+      snapshots.push(snapshot);
+    }
+
+    await this.chatSnapshotRepository.save(snapshots);
+    this.chatCache.delete(sessionId);
+  }
+
+  private async persistChatSummaries(sessionId: string, chats: ChatSummary[]): Promise<void> {
+    if (chats.length === 0) return;
+    const chatIds = [...new Set(chats.map(chat => chat.id).filter(Boolean))];
+    const existing = await this.chatSnapshotRepository.find({
+      where: { sessionId, chatId: In(chatIds) },
+    });
+    const byChatId = new Map(existing.map(snapshot => [snapshot.chatId, snapshot]));
+    const snapshots: ChatSnapshot[] = [];
+
+    for (const chat of chats) {
+      const current = byChatId.get(chat.id);
+      const contactPhone = chat.isGroup ? null : this.phoneFromDirectChatId(chat.id);
+      const snapshot =
+        current ??
+        this.chatSnapshotRepository.create({
+          sessionId,
+          chatId: chat.id,
+          name: chat.name || contactPhone || chat.id,
+          isGroup: chat.isGroup,
+          unreadCount: chat.unreadCount || 0,
+          timestamp: this.toTimestamp(chat.timestamp),
+          lastMessage: chat.lastMessage || null,
+          contactPhone,
+        });
+      const liveName = chat.name?.trim();
+      if (this.isUsefulChatName(liveName, chat.id) || !this.isUsefulChatName(snapshot.name, chat.id)) {
+        snapshot.name = liveName || contactPhone || snapshot.name || chat.id;
+      }
+      snapshot.isGroup = chat.isGroup;
+      snapshot.unreadCount = Math.max(0, chat.unreadCount || 0);
+      snapshot.contactPhone = snapshot.contactPhone || contactPhone;
+      if (this.toTimestamp(chat.timestamp) >= this.toTimestamp(snapshot.timestamp)) {
+        snapshot.timestamp = this.toTimestamp(chat.timestamp);
+        snapshot.lastMessage = chat.lastMessage || snapshot.lastMessage;
+      }
+      snapshots.push(snapshot);
+    }
+
+    await this.chatSnapshotRepository.save(snapshots);
+  }
+
+  private async persistSessionContacts(sessionId: string, contacts: Contact[]): Promise<void> {
+    if (contacts.length === 0) return;
+    const [savedContacts, snapshots] = await Promise.all([
+      this.savedContactRepository.find({ where: { sessionId } }),
+      this.chatSnapshotRepository.find({ where: { sessionId } }),
+    ]);
+    const savedByNumber = new Map(savedContacts.map(contact => [this.normalizeDigits(contact.number), contact]));
+    const snapshotsByChatId = new Map(snapshots.map(snapshot => [snapshot.chatId, snapshot]));
+    const contactsToSave = new Map<string, SavedContact>();
+    const snapshotsToSave = new Map<string, ChatSnapshot>();
+
+    for (const contact of contacts) {
+      const phone = this.normalizeContactPhone(contact.number, contact.id);
+      if (!phone) continue;
+      const name = contact.name?.trim() || contact.pushName?.trim() || null;
+      const saved =
+        savedByNumber.get(phone) ??
+        this.savedContactRepository.create({ sessionId, number: phone, name, source: 'session' });
+      saved.number = phone;
+      saved.name = saved.name?.trim() || name;
+      saved.source = saved.source || 'session';
+      savedByNumber.set(phone, saved);
+      contactsToSave.set(phone, saved);
+
+      const snapshot = snapshotsByChatId.get(contact.id);
+      if (snapshot) {
+        snapshot.contactPhone = phone;
+        if (name) snapshot.name = name;
+        snapshotsToSave.set(snapshot.chatId, snapshot);
+      }
+    }
+
+    if (contactsToSave.size > 0) await this.savedContactRepository.save([...contactsToSave.values()]);
+    if (snapshotsToSave.size > 0) await this.chatSnapshotRepository.save([...snapshotsToSave.values()]);
+  }
+
+  private startArchiveSync(sessionId: string, engine: IWhatsAppEngine): Promise<void> {
+    const running = this.archiveSyncs.get(sessionId);
+    if (running) return running;
+
+    const sync = this.syncDurableSessionData(sessionId, engine)
+      .catch(error => {
+        this.logger.warn(`Background history sync stopped for session ${sessionId}`, {
+          sessionId,
+          reason: error instanceof Error ? error.message : String(error),
+          action: 'history_sync_failed',
+        });
+      })
+      .finally(() => this.archiveSyncs.delete(sessionId));
+    this.archiveSyncs.set(sessionId, sync);
+    return sync;
+  }
+
+  private async syncDurableSessionData(sessionId: string, engine: IWhatsAppEngine): Promise<void> {
+    if (this.engines.get(sessionId) !== engine || engine.getStatus() !== EngineStatus.READY) return;
+
+    const chats = await this.refreshChats(sessionId, engine);
+    try {
+      await this.persistSessionContacts(sessionId, await engine.getContacts());
+    } catch (error) {
+      this.logger.warn(`Contact snapshot sync failed for session ${sessionId}`, {
+        sessionId,
+        reason: error instanceof Error ? error.message : String(error),
+        action: 'contact_sync_failed',
+      });
+    }
+
+    const configuredLimit = Number(process.env.SESSION_HISTORY_SYNC_LIMIT ?? SessionService.DEFAULT_HISTORY_SYNC_LIMIT);
+    const historyLimit = Number.isFinite(configuredLimit)
+      ? Math.min(Math.max(Math.trunc(configuredLimit), 1), 2000)
+      : SessionService.DEFAULT_HISTORY_SYNC_LIMIT;
+    const configuredDelay = Number(process.env.SESSION_HISTORY_SYNC_DELAY_MS ?? 75);
+    const syncDelay = Number.isFinite(configuredDelay) ? Math.max(Math.trunc(configuredDelay), 0) : 75;
+
+    for (const chat of chats) {
+      if (
+        this.stoppingSessions.has(sessionId) ||
+        this.engines.get(sessionId) !== engine ||
+        engine.getStatus() !== EngineStatus.READY
+      ) {
+        break;
+      }
+      try {
+        const history = await engine.getChatHistory(chat.id, historyLimit, false);
+        await this.persistHistory(sessionId, history, chat.id);
+      } catch (error) {
+        this.logger.debug(`Could not archive chat ${chat.id}`, {
+          sessionId,
+          reason: error instanceof Error ? error.message : String(error),
+          action: 'chat_history_sync_skipped',
+        });
+      }
+      if (syncDelay > 0) await this.delay(syncDelay);
+    }
+  }
+
+  private phoneFromDirectChatId(chatId: string): string | null {
+    if (!chatId.endsWith('@c.us') && !chatId.endsWith('@s.whatsapp.net')) return null;
+    return this.normalizeDigits(chatId.split('@')[0]) || null;
+  }
+
+  private normalizeContactPhone(value: unknown, contactId: string): string | null {
+    if (typeof value !== 'string' && typeof value !== 'number') return null;
+    const phone = this.normalizeDigits(String(value));
+    if (!phone) return null;
+    const privacyId = contactId.endsWith('@lid') ? this.normalizeDigits(contactId.split('@')[0]) : '';
+    return privacyId && privacyId === phone ? null : phone;
+  }
+
+  private normalizeDigits(value: string): string {
+    return value.replace(/\D/g, '');
+  }
+
+  private isUsefulChatName(name: string | null | undefined, chatId: string): boolean {
+    const value = name?.trim();
+    return Boolean(value && value !== chatId && !value.includes('@'));
+  }
+
+  private messagePreview(message: IncomingMessage): string | null {
+    if (message.body?.trim()) return message.body;
+    if (message.type === 'unknown') return null;
+    return `[${message.type}]`;
+  }
+
+  private toTimestamp(value: number | string | null | undefined): number {
+    const timestamp = Number(value);
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+
   private async persistOutgoingEngineMessage(sessionId: string, outgoing: IncomingMessage): Promise<void> {
     try {
+      outgoing = await this.mediaArchiveService.archiveMessage(sessionId, outgoing);
       let stored = await this.messageRepository.findOne({
         where: { sessionId, waMessageId: outgoing.id },
       });
+
+      // Evolution Go sends Aurora's deterministic client id back as the WhatsApp id. Match it before
+      // body-based fallbacks so concurrent identical sends and retry echoes update the correct row.
+      if (!stored) {
+        const pendingCandidates = await this.messageRepository.find({
+          where: {
+            sessionId,
+            direction: MessageDirection.OUTGOING,
+            status: In([MessageStatus.PENDING, MessageStatus.FAILED]),
+          },
+          order: { createdAt: 'DESC' },
+          take: 100,
+        });
+        stored = pendingCandidates.find(message => message.metadata?.clientMessageId === outgoing.id) ?? null;
+      }
 
       // During an API send, message_create can arrive before MessageService has attached the WhatsApp
       // id to its pending row. Match the newest pending copy by chat/body before creating a new row.
@@ -900,9 +1391,12 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         stored.body = outgoing.body || stored.body;
         stored.type = outgoing.type === 'unknown' ? stored.type : outgoing.type;
         stored.timestamp = outgoing.timestamp;
+        stored.mediaPath = outgoing.media?.storagePath || stored.mediaPath;
+        stored.mediaMimetype = outgoing.media?.mimetype || stored.mediaMimetype;
         stored.status = MessageStatus.SENT;
         stored.metadata = { ...(stored.metadata || {}), ...incomingMetadata };
         await this.messageRepository.save(stored);
+        await this.persistMessageChatSnapshots(sessionId, [{ ...outgoing, chatId: stored.chatId }], false);
         return;
       }
 
@@ -916,10 +1410,13 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
         type: outgoing.type,
         direction: MessageDirection.OUTGOING,
         timestamp: outgoing.timestamp,
+        mediaPath: outgoing.media?.storagePath,
+        mediaMimetype: outgoing.media?.mimetype,
         status: MessageStatus.SENT,
         metadata: Object.keys(incomingMetadata).length > 0 ? incomingMetadata : undefined,
       });
       await this.messageRepository.save(message);
+      await this.persistMessageChatSnapshots(sessionId, [outgoing], false);
     } catch (error) {
       this.logger.error(`Failed to persist outgoing engine message ${outgoing.id}`, String(error));
     }
@@ -976,7 +1473,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     const engine = this.engines.get(id);
 
     if (!engine) {
-      throw new BadRequestException('Session is not started');
+      return this.getChatsFromStoredMessages(id);
     }
 
     return this.refreshChats(id, engine);
@@ -1024,6 +1521,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
           );
         }),
       ]);
+      await this.persistChatSummaries(id, liveChats);
       const storedChats = await this.getChatsFromStoredMessages(id);
       const chats = this.mergeChats(liveChats, storedChats);
       this.chatCache.set(id, { chats, expiresAt: Date.now() + SessionService.CHAT_CACHE_TTL_MS });
@@ -1055,9 +1553,15 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       if ((storedChat.timestamp || 0) > (liveChat.timestamp || 0)) {
         merged.set(storedChat.id, {
           ...liveChat,
+          name: this.isUsefulChatName(liveChat.name, liveChat.id) ? liveChat.name : storedChat.name,
           timestamp: storedChat.timestamp,
           lastMessage: storedChat.lastMessage || liveChat.lastMessage,
         });
+      } else if (
+        !this.isUsefulChatName(liveChat.name, liveChat.id) &&
+        this.isUsefulChatName(storedChat.name, storedChat.id)
+      ) {
+        merged.set(storedChat.id, { ...liveChat, name: storedChat.name });
       }
     }
 
@@ -1065,29 +1569,66 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
   }
 
   private async getChatsFromStoredMessages(sessionId: string): Promise<ChatSummary[]> {
-    const messages = await this.messageRepository.find({
-      where: { sessionId },
-      order: { createdAt: 'DESC' },
-      take: SessionService.CHAT_FALLBACK_MESSAGE_SCAN,
-    });
+    const [snapshots, messages] = await Promise.all([
+      this.chatSnapshotRepository.find({
+        where: { sessionId },
+        order: { timestamp: 'DESC', updatedAt: 'DESC' },
+      }),
+      this.messageRepository.find({
+        where: { sessionId },
+        order: { timestamp: 'DESC', createdAt: 'DESC' },
+        take: SessionService.CHAT_FALLBACK_MESSAGE_SCAN,
+      }),
+    ]);
 
     const chats = new Map<string, ChatSummary>();
+    for (const snapshot of snapshots) {
+      chats.set(snapshot.chatId, {
+        id: snapshot.chatId,
+        name: snapshot.name || snapshot.contactPhone || snapshot.chatId,
+        isGroup: snapshot.isGroup,
+        unreadCount: Math.max(0, snapshot.unreadCount || 0),
+        timestamp: this.toTimestamp(snapshot.timestamp),
+        lastMessage: snapshot.lastMessage || undefined,
+      });
+    }
+
     for (const message of messages) {
-      if (!message.chatId || chats.has(message.chatId)) {
+      if (!message.chatId) continue;
+      const current = chats.get(message.chatId);
+      const metadata = message.metadata as
+        | { senderPhone?: unknown; contact?: { name?: unknown; pushName?: unknown } }
+        | undefined;
+      const phone =
+        this.normalizeContactPhone(metadata?.senderPhone, message.chatId) || this.phoneFromDirectChatId(message.chatId);
+      const contactName =
+        (typeof metadata?.contact?.name === 'string' && metadata.contact.name.trim()) ||
+        (typeof metadata?.contact?.pushName === 'string' && metadata.contact.pushName.trim()) ||
+        null;
+      const timestamp =
+        this.toTimestamp(message.timestamp) ||
+        (message.createdAt instanceof Date ? Math.floor(message.createdAt.getTime() / 1000) : 0);
+      const name = contactName || phone || current?.name || message.chatId;
+
+      if (!current) {
+        chats.set(message.chatId, {
+          id: message.chatId,
+          name,
+          isGroup: message.chatId.endsWith('@g.us'),
+          unreadCount: 0,
+          timestamp,
+          lastMessage: message.body || (message.type !== 'unknown' ? `[${message.type}]` : undefined),
+        });
         continue;
       }
 
-      chats.set(message.chatId, {
-        id: message.chatId,
-        name: message.chatId,
-        isGroup: message.chatId.endsWith('@g.us'),
-        unreadCount: 0,
-        timestamp:
-          typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)
-            ? message.timestamp
-            : Math.floor(message.createdAt.getTime() / 1000),
-        lastMessage: message.body || undefined,
-      });
+      if (!this.isUsefulChatName(current.name, current.id) && this.isUsefulChatName(name, message.chatId)) {
+        current.name = name;
+      }
+      if (timestamp > (current.timestamp || 0)) {
+        current.timestamp = timestamp;
+        current.lastMessage = message.body || (message.type !== 'unknown' ? `[${message.type}]` : current.lastMessage);
+      }
     }
 
     return [...chats.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -1095,11 +1636,10 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
 
   async sendSeen(id: string, chatId: string): Promise<boolean> {
     await this.findOne(id); // Verify session exists
+    await this.chatSnapshotRepository.update({ sessionId: id, chatId }, { unreadCount: 0 });
     const engine = this.engines.get(id);
 
-    if (!engine) {
-      throw new BadRequestException('Session is not started');
-    }
+    if (!engine || engine.getStatus() !== EngineStatus.READY) return false;
 
     return engine.sendSeen(chatId);
   }

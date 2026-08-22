@@ -23,4 +23,17 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ PORT: '70000' })).toThrow(/PORT/);
     expect(() => validateEnv({ PORT: '2785' })).not.toThrow();
   });
+
+  it('requires explicit Evolution Go credentials when that engine is selected', () => {
+    expect(() => validateEnv({ ENGINE_TYPE: 'evolution-go' })).toThrow(/EVOLUTION_GO_API_KEY/);
+    expect(() =>
+      validateEnv({
+        ENGINE_TYPE: 'evolution-go',
+        EVOLUTION_GO_BASE_URL: 'http://evolution-go:8080',
+        EVOLUTION_GO_API_KEY: 'api-key',
+        EVOLUTION_GO_INSTANCE_TOKEN_SECRET: 'token-secret',
+      }),
+    ).not.toThrow();
+    expect(() => validateEnv({ ENGINE_TYPE: 'unknown' })).toThrow(/ENGINE_TYPE/);
+  });
 });

@@ -54,7 +54,7 @@ export default () => ({
 
   // WhatsApp engine configuration
   engine: {
-    type: process.env.ENGINE_TYPE || 'whatsapp-web.js',
+    type: process.env.ENGINE_TYPE || 'evolution-go',
     puppeteer: {
       headless: process.env.PUPPETEER_HEADLESS !== 'false',
       args: (process.env.PUPPETEER_ARGS || '--no-sandbox,--disable-setuid-sandbox').split(','),
@@ -68,6 +68,16 @@ export default () => ({
     // gets its own subdirectory. Read by the Baileys plugin from the opaque engine config blob.
     baileys: {
       authDir: process.env.BAILEYS_AUTH_DIR || './data/baileys',
+    },
+    // Evolution Go runs as a dedicated whatsmeow sidecar. Aurora remains the source of truth for
+    // application data while Evolution owns only the live WhatsApp transport and auth store.
+    evolutionGo: {
+      baseUrl: process.env.EVOLUTION_GO_BASE_URL || 'http://localhost:8080',
+      apiKey: process.env.EVOLUTION_GO_API_KEY || '',
+      instanceTokenSecret: process.env.EVOLUTION_GO_INSTANCE_TOKEN_SECRET || '',
+      requestTimeoutMs: parseInt(process.env.EVOLUTION_GO_REQUEST_TIMEOUT_MS || '15000', 10),
+      healthCheckIntervalMs: parseInt(process.env.EVOLUTION_GO_HEALTH_INTERVAL_MS || '15000', 10),
+      websocketReconnectBaseDelayMs: parseInt(process.env.EVOLUTION_GO_WS_RECONNECT_DELAY_MS || '1000', 10),
     },
   },
 

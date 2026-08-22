@@ -50,6 +50,9 @@ export function generateIdempotencyKey(event: string, data: Record<string, unkno
     case 'message.revoked':
       return `rev_${toStr(data.sessionId)}_${toStr(data.id ?? data.messageId)}`;
 
+    case 'message.edited':
+      return `edit_${toStr(data.sessionId)}_${toStr(data.id ?? data.messageId)}_${hashData({ body: data.body })}`;
+
     case 'session.status':
       // Session + status combo (same status emitted once per transition)
       return `sess_${toStr(data.sessionId)}_${toStr(data.status)}`;

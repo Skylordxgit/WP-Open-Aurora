@@ -56,6 +56,7 @@
 | 21  | [Glossary](./21-glossary.md)                                     | Terms and definitions                             |
 | 22  | [n8n Integration](./22-n8n-integration.md)                       | n8n community nodes for OpenWA                    |
 | 23  | [Community Integrations](./23-community-integrations.md)         | Third-party adapters built on the OpenWA API      |
+| 24  | [Evolution Go Engine](./24-evolution-go-engine.md)               | Primary engine, persistence, recovery, and rollout |
 
 ## Quick Start
 
@@ -181,7 +182,7 @@ socket.on('message', msg => {
 | Audit Logging                   | Ready                         |
 | Groups / Contacts / Labels API  | Ready                         |
 | Channels / Status / Catalog API | Experimental (engine-limited) |
-| Pluggable Engine (wwebjs / Baileys) | Ready (set `ENGINE_TYPE`)  |
+| Pluggable Engine (Evolution Go / wwebjs / Baileys) | Ready (set `ENGINE_TYPE`) |
 | Plugin Extension System         | Ready                         |
 | Queue-based Webhook Retries     | Optional (QUEUE_ENABLED=true) |
 
@@ -192,7 +193,7 @@ socket.on('message', msg => {
 | Runtime   | Node.js 22 LTS                |
 | Framework | NestJS 11.x                   |
 | Language  | TypeScript 5.x                |
-| WA Engine | Pluggable (`ENGINE_TYPE`): whatsapp-web.js (default) or Baileys |
+| WA Engine | Evolution Go 0.7.2 primary; wwebjs and Baileys remain optional |
 | WebSocket | Socket.IO                     |
 | Database  | SQLite (default) / PostgreSQL |
 | ORM       | TypeORM                       |

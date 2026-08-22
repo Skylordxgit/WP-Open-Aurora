@@ -19,6 +19,8 @@ export interface MediaInput {
   data: Buffer | string; // Buffer or base64 or URL
   filename?: string;
   caption?: string;
+  /** Stable outbound ID for engines that support idempotent retries. */
+  clientMessageId?: string;
 }
 
 /**
@@ -80,6 +82,10 @@ export interface IncomingMessage {
     mimetype: string;
     filename?: string;
     data?: string; // base64
+    /** Durable object-storage URL supplied by a remote engine, when available. */
+    url?: string;
+    /** Aurora-owned storage key. Engine adapters never set this field. */
+    storagePath?: string;
   };
   quotedMessage?: {
     id: string;
@@ -137,6 +143,7 @@ export interface GroupInfo {
 export interface ContactCard {
   name: string;
   number: string;
+  clientMessageId?: string;
 }
 
 export interface LocationInput {
@@ -144,6 +151,7 @@ export interface LocationInput {
   longitude: number;
   description?: string;
   address?: string;
+  clientMessageId?: string;
 }
 
 export interface ReactionSender {
@@ -298,6 +306,15 @@ export interface ReactionEvent {
   senderId: string;
 }
 
+/** A text message edit normalized at the engine boundary. */
+export interface EditedMessage {
+  messageId: string;
+  chatId: string;
+  body: string;
+  type: MessageType;
+  timestamp: number;
+}
+
 export interface EngineEventCallbacks {
   onQRCode?: (qr: string) => void;
   onReady?: (phone: string, pushName: string) => void;
@@ -314,6 +331,14 @@ export interface EngineEventCallbacks {
   onMessageAck?: (messageId: string, status: DeliveryStatus) => void;
   onMessageRevoked?: (message: RevokedMessage) => void;
   onMessageReaction?: (event: ReactionEvent) => void;
+  onMessageEdited?: (message: EditedMessage) => void;
+  /**
+   * Fired for an engine-provided history backfill. Unlike live-message callbacks, consumers should
+   * persist this batch without publishing duplicate real-time/webhook notifications.
+   */
+  onHistorySync?: (messages: IncomingMessage[]) => void;
+  /** Fired after the engine's contact store changes so the durable contact snapshot can be refreshed. */
+  onContactsSync?: (contacts: Contact[]) => void;
   onDisconnected?: (reason: string) => void;
   onStateChanged?: (state: EngineStatus) => void;
   /**
@@ -342,7 +367,7 @@ export interface IWhatsAppEngine {
   getPushName(): string | null;
 
   // Messaging - Basic
-  sendTextMessage(chatId: string, text: string): Promise<MessageResult>;
+  sendTextMessage(chatId: string, text: string, clientMessageId?: string): Promise<MessageResult>;
   sendImageMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
   sendVideoMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
   sendAudioMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
@@ -354,7 +379,7 @@ export interface IWhatsAppEngine {
   sendStickerMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
 
   // Reply & Forward
-  replyToMessage(chatId: string, quotedMsgId: string, text: string): Promise<MessageResult>;
+  replyToMessage(chatId: string, quotedMsgId: string, text: string, clientMessageId?: string): Promise<MessageResult>;
   forwardMessage(fromChatId: string, toChatId: string, messageId: string): Promise<MessageResult>;
 
   // Reactions (Phase 3)
@@ -394,6 +419,8 @@ export interface IWhatsAppEngine {
   revokeGroupInviteCode(groupId: string): Promise<string>;
 
   // Message Operations
+  /** Edit an outgoing text message when the active engine supports it. */
+  editMessage?(chatId: string, messageId: string, text: string): Promise<void>;
   deleteMessage(chatId: string, messageId: string, forEveryone?: boolean): Promise<void>;
   getChatHistory(chatId: string, limit?: number, includeMedia?: boolean): Promise<IncomingMessage[]>;
 

@@ -8,11 +8,12 @@ import { SessionModule } from '../session/session.module';
 import { TemplateModule } from '../template/template.module';
 import { Message } from './entities/message.entity';
 import { MessageBatch } from './entities/message-batch.entity';
+import { MessageRetryService } from './message-retry.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Message, MessageBatch], 'data'), SessionModule, TemplateModule],
   controllers: [MessageController],
-  providers: [MessageService, BulkMessageService, MessageTypeBackfillService],
+  providers: [MessageService, BulkMessageService, MessageTypeBackfillService, MessageRetryService],
   exports: [MessageService, BulkMessageService],
 })
 export class MessageModule {}

@@ -269,7 +269,7 @@ export interface ChatMessage {
   timestamp?: number;
   createdAt: string;
   metadata?: {
-    media?: { mimetype: string; filename?: string; data?: string };
+    media?: { mimetype: string; filename?: string; data?: string; url?: string; archived?: boolean };
     quotedMessage?: { id: string; body: string };
     reactions?: Record<string, string>;
     location?: {
@@ -293,7 +293,7 @@ export interface LiveChatMessage {
   timestamp: number;
   fromMe: boolean;
   isGroup: boolean;
-  media?: { mimetype: string; filename?: string; data?: string };
+  media?: { mimetype: string; filename?: string; data?: string; url?: string; archived?: boolean };
   quotedMessage?: { id: string; body: string };
   location?: {
     latitude: number;
@@ -768,6 +768,11 @@ export const messageApi = {
       {
         method: 'POST',
       },
+    ),
+  getArchivedMedia: (sessionId: string, messageId: string) =>
+    request<{ data: string; mimetype: string; filename?: string }>(
+      `/sessions/${sessionId}/messages/${messageId}/media`,
+      { timeoutMs: 90000 },
     ),
 };
 

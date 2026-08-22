@@ -1,20 +1,44 @@
-import { BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { NotFoundException } from '@nestjs/common';
 import { ContactService } from './contact.service';
 import { SessionService } from '../session/session.service';
 import { EngineStatus, IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 
 describe('ContactService', () => {
-  const makeService = (engine: Partial<IWhatsAppEngine> | undefined) => {
-    const sessionService = { getEngine: jest.fn().mockReturnValue(engine) } as unknown as SessionService;
+  const makeService = (
+    engine: Partial<IWhatsAppEngine> | undefined,
+    options?: { snapshot?: Record<string, unknown>; archivedProfile?: Buffer },
+  ) => {
+    const normalizedEngine = engine
+      ? ({ getStatus: jest.fn().mockReturnValue(EngineStatus.READY), ...engine } as Partial<IWhatsAppEngine>)
+      : undefined;
+    const sessionService = { getEngine: jest.fn().mockReturnValue(normalizedEngine) } as unknown as SessionService;
     const savedContactRepository = {
       find: jest.fn().mockResolvedValue([]),
+      create: jest.fn((value: Record<string, unknown>): Record<string, unknown> => value),
+      save: jest.fn((value: unknown): Promise<unknown> => Promise.resolve(value)),
     };
     const messageRepository = { find: jest.fn().mockResolvedValue([]) };
-    return new ContactService(sessionService, savedContactRepository as never, messageRepository as never);
+    const chatSnapshotRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(options?.snapshot ?? null),
+      create: jest.fn((value: Record<string, unknown>): Record<string, unknown> => value),
+      save: jest.fn((value: unknown): Promise<unknown> => Promise.resolve(value)),
+    };
+    const mediaArchiveService = {
+      archiveMedia: jest.fn().mockResolvedValue({ storagePath: 'profiles/contact.jpg', mimetype: 'image/jpeg' }),
+      read: jest.fn().mockResolvedValue(options?.archivedProfile ?? Buffer.from('profile')),
+    };
+    return new ContactService(
+      sessionService,
+      savedContactRepository as never,
+      messageRepository as never,
+      chatSnapshotRepository as never,
+      mediaArchiveService as never,
+    );
   };
 
-  it('throws 400 when the session is not started', () => {
-    expect(() => makeService(undefined).getContacts('s1')).toThrow(BadRequestException);
+  it('returns stored contacts without requiring a started session', async () => {
+    await expect(makeService(undefined).getContacts('s1')).resolves.toEqual([]);
   });
 
   it('maps a missing contact to 404', async () => {
@@ -32,6 +56,28 @@ describe('ContactService', () => {
     const getNumberId = jest.fn().mockResolvedValue('628123@c.us');
     await expect(makeService({ getNumberId }).getNumberId('s1', '628123')).resolves.toBe('628123@c.us');
     expect(getNumberId).toHaveBeenCalledWith('628123');
+  });
+
+  it('archives a live profile picture without changing the response contract', async () => {
+    const getProfilePicture = jest.fn().mockResolvedValue('https://pps.whatsapp.net/profile.jpg');
+    await expect(makeService({ getProfilePicture }).getProfilePicture('s1', '628123@c.us')).resolves.toBe(
+      'https://pps.whatsapp.net/profile.jpg',
+    );
+  });
+
+  it('serves an archived profile picture while the session is offline', async () => {
+    const snapshot = {
+      sessionId: 's1',
+      chatId: '628123@c.us',
+      profilePicPath: 'profiles/contact.jpg',
+      profilePicMimetype: 'image/jpeg',
+    };
+    await expect(
+      makeService(undefined, { snapshot, archivedProfile: Buffer.from('profile') }).getProfilePicture(
+        's1',
+        '628123@c.us',
+      ),
+    ).resolves.toBe(`data:image/jpeg;base64,${Buffer.from('profile').toString('base64')}`);
   });
 
   it('delegates resolveContactPhone to the engine', async () => {
@@ -106,10 +152,10 @@ describe('ContactService', () => {
     ]);
   });
 
-  it('returns 503 while the WhatsApp session is still synchronizing so callers can retry', async () => {
+  it('returns persisted identity data while the WhatsApp session is synchronizing', async () => {
     const svc = makeService({ getStatus: jest.fn().mockReturnValue(EngineStatus.INITIALIZING) });
-    await expect(svc.resolveContacts('s1', ['152695264563252@lid'])).rejects.toBeInstanceOf(
-      ServiceUnavailableException,
-    );
+    await expect(svc.resolveContacts('s1', ['152695264563252@lid'])).resolves.toEqual([
+      { contactId: '152695264563252@lid', phone: null, name: null },
+    ]);
   });
 });

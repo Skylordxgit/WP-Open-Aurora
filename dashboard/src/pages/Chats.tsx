@@ -44,7 +44,13 @@ import { useRole } from '../hooks/useRole';
 import { useToast } from '../components/Toast';
 import './Chats.css';
 
-type MessageMedia = { mimetype: string; filename?: string; data?: string };
+type MessageMedia = {
+  mimetype: string;
+  filename?: string;
+  data?: string;
+  url?: string;
+  archived?: boolean;
+};
 
 interface ChatMessageView extends ChatMessage {
   metadata?: {
@@ -63,7 +69,9 @@ interface ChatMessageView extends ChatMessage {
 
 const INITIAL_HISTORY_LIMIT = 100;
 const HISTORY_PAGE_SIZE = 100;
-const MAX_HISTORY_LIMIT = 500;
+const MAX_HISTORY_LIMIT = 5000;
+const WHATSAPP_SESSION_DISCONNECTED_MESSAGE =
+  'This WhatsApp chat session has been closed or disconnected. Please reconnect the WhatsApp session before sending a message.';
 
 // Delivery acks must only ADVANCE the tick, never regress it. The backend DB update is forward-only
 // (ackStatusTransitionFrom), but the live websocket ack fires on every receipt (incl. pending/sent)
@@ -109,11 +117,12 @@ const messageTypeFromMime = (mimetype: string): MessageType => {
 };
 
 const getMediaSrc = (media?: MessageMedia): string => {
-  if (!media || !media.data) return '';
-  if (media.data.startsWith('data:') || media.data.startsWith('http://') || media.data.startsWith('https://')) {
-    return media.data;
+  const source = media?.data || media?.url;
+  if (!media || !source) return '';
+  if (source.startsWith('data:') || source.startsWith('http://') || source.startsWith('https://')) {
+    return source;
   }
-  return `data:${media.mimetype};base64,${media.data}`;
+  return `data:${media.mimetype};base64,${source}`;
 };
 
 const getChatNumber = (chatId: string): string => chatId.split('@')[0];
@@ -144,6 +153,49 @@ const loadStoredMessageHistory = async (sessionId: string, chatId: string, limit
   }
 
   return { messages: messages.slice(0, limit), total };
+};
+
+const resolveContactsInBatches = async (sessionId: string, contactIds: string[]) => {
+  const batches: string[][] = [];
+  for (let index = 0; index < contactIds.length; index += 250) {
+    batches.push(contactIds.slice(index, index + 250));
+  }
+  return (await Promise.all(batches.map(batch => contactApi.resolve(sessionId, batch)))).flat();
+};
+
+const hydrateArchivedMessageMedia = async (
+  sessionId: string,
+  messages: ChatMessageView[],
+): Promise<ChatMessageView[]> => {
+  const targets = messages.filter(message => {
+    const media = message.metadata?.media;
+    return Boolean(media?.archived && !media.data && !media.url);
+  });
+  if (targets.length === 0) return [];
+
+  const hydrated: ChatMessageView[] = [];
+  let nextIndex = 0;
+  const worker = async () => {
+    for (;;) {
+      const message = targets[nextIndex++];
+      if (!message) return;
+      try {
+        const media = await messageApi.getArchivedMedia(sessionId, message.id);
+        hydrated.push({
+          ...message,
+          metadata: {
+            ...message.metadata,
+            media: { ...message.metadata?.media, ...media, archived: true },
+          },
+        });
+      } catch {
+        // Keep the normal unavailable-media placeholder if the archived object was removed.
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()));
+  return hydrated;
 };
 
 const messageIdentity = (message: ChatMessageView): string => message.waMessageId || message.id;
@@ -200,9 +252,9 @@ const mergeMessageHistory = (...collections: ChatMessageView[][]): ChatMessageVi
 
       const existingMedia = existing.metadata?.media;
       const incomingMedia = message.metadata?.media;
-      const media = incomingMedia?.data
+      const media = incomingMedia?.data || incomingMedia?.url
         ? incomingMedia
-        : existingMedia?.data
+        : existingMedia?.data || existingMedia?.url
           ? existingMedia
           : incomingMedia || existingMedia;
       const metadata = {
@@ -308,11 +360,11 @@ export function Chats() {
       try {
         setLoadingSessions(true);
         const list = await sessionApi.list();
-        const readySessions = list.filter(s => s.status === 'ready');
-        setSessions(readySessions);
-        if (readySessions.length > 0) {
-          setSelectedSessionId(readySessions[0].id);
-        }
+        const orderedSessions = [...list].sort((a, b) => Number(b.status === 'ready') - Number(a.status === 'ready'));
+        setSessions(orderedSessions);
+        setSelectedSessionId(current =>
+          current && orderedSessions.some(session => session.id === current) ? current : orderedSessions[0]?.id || '',
+        );
       } catch (err) {
         showErrorToast(t('chats.errors.loadSessions'), err instanceof Error ? err.message : undefined);
       } finally {
@@ -333,11 +385,10 @@ export function Chats() {
         const sorted = [...data].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
         setChats(sorted);
 
-        const privacyContactIds = sorted.filter(chat => !chat.isGroup && chat.id.endsWith('@lid')).map(chat => chat.id);
-        if (privacyContactIds.length > 0 && !contactResolutionInFlightRef.current) {
+        const directContactIds = sorted.filter(chat => !chat.isGroup).map(chat => chat.id);
+        if (directContactIds.length > 0 && !contactResolutionInFlightRef.current) {
           contactResolutionInFlightRef.current = sessionId;
-          void contactApi
-            .resolve(sessionId, privacyContactIds)
+          void resolveContactsInBatches(sessionId, directContactIds)
             .then(resolvedContacts => {
               if (resolutionRequestId !== contactResolutionRequestRef.current) return;
               const resolvedById = new Map(resolvedContacts.map(contact => [contact.contactId, contact]));
@@ -364,7 +415,6 @@ export function Chats() {
         }
       } catch (err) {
         showErrorToast(t('chats.errors.loadChats'), err instanceof Error ? err.message : undefined);
-        setChats([]);
       } finally {
         setLoadingChats(false);
       }
@@ -405,7 +455,7 @@ export function Chats() {
       }
       contactResolutionInFlightRef.current = selectedSessionId;
       try {
-        const resolvedContacts = await contactApi.resolve(selectedSessionId, unresolvedIds);
+        const resolvedContacts = await resolveContactsInBatches(selectedSessionId, unresolvedIds);
         if (cancelled) return;
         if (!resolvedContacts.some(contact => contact.phone || contact.name)) return;
         const resolvedById = new Map(resolvedContacts.map(contact => [contact.contactId, contact]));
@@ -670,16 +720,25 @@ export function Chats() {
               (storedResult.status === 'fulfilled' && storedResult.value.total > limit)),
         );
 
+        const mediaHydrationTasks: Promise<ChatMessageView[]>[] = [];
+        if (loadedMessages.some(message => message.metadata?.media?.archived)) {
+          mediaHydrationTasks.push(hydrateArchivedMessageMedia(selectedSessionId, loadedMessages));
+        }
         if (liveResult.status === 'fulfilled') {
+          mediaHydrationTasks.push(
+            sessionApi
+              .getLiveChatHistory(selectedSessionId, chatId, limit, true)
+              .then(mediaHistory => mediaHistory.map(normalizeLiveMessage)),
+          );
+        }
+
+        if (mediaHydrationTasks.length > 0) {
           setLoadingMedia(true);
-          void sessionApi
-            .getLiveChatHistory(selectedSessionId, chatId, limit, true)
-            .then(mediaHistory => {
+          void Promise.allSettled(mediaHydrationTasks)
+            .then(results => {
               if (requestId !== messageRequestRef.current) return;
-              setMessages(previous => mergeMessageHistory(previous, mediaHistory.map(normalizeLiveMessage)));
-            })
-            .catch(() => {
-              // Expired or unavailable WhatsApp media is represented by a clear placeholder below.
+              const hydrated = results.flatMap(result => (result.status === 'fulfilled' ? result.value : []));
+              if (hydrated.length > 0) setMessages(previous => mergeMessageHistory(previous, hydrated));
             })
             .finally(() => {
               if (requestId === messageRequestRef.current) setLoadingMedia(false);
@@ -704,7 +763,7 @@ export function Chats() {
   // reconnecting. Recover the live history automatically so old incoming and outgoing messages appear
   // without requiring the operator to refresh or reselect the conversation.
   useEffect(() => {
-    if (!selectedSessionId || !activeChatId || historySource !== 'stored') return;
+    if (!selectedSessionId || !activeChatId || historySource !== 'stored' || !isSessionReady) return;
 
     let cancelled = false;
     let retryTimer: number | undefined;
@@ -748,7 +807,7 @@ export function Chats() {
       cancelled = true;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
     };
-  }, [activeChatId, historyLimit, historySource, messages.length, selectedSessionId]);
+  }, [activeChatId, historyLimit, historySource, isSessionReady, messages.length, selectedSessionId]);
 
   const handleLoadOlderMessages = () => {
     if (!activeChat || loadingOlderMessages) return;
@@ -906,7 +965,7 @@ export function Chats() {
     if (e) e.preventDefault();
     if (!selectedSessionId || !activeChat || sending) return;
     if (!isSessionReady) {
-      showWarningToast('WhatsApp is still synchronizing', 'Please wait for the session to reconnect before sending.');
+      showErrorToast('Failed to send message', WHATSAPP_SESSION_DISCONNECTED_MESSAGE);
       return;
     }
 
@@ -1093,10 +1152,9 @@ export function Chats() {
       return sortMode === 'recent' ? bTime - aTime : aTime - bTime;
     });
 
-  const inboxTitle =
-    !hasSessions
-      ? 'Chat workspace'
-      : inboxView === 'unread'
+  const inboxTitle = !hasSessions
+    ? 'Chat workspace'
+    : inboxView === 'unread'
       ? 'Unread queue'
       : inboxView === 'direct'
         ? 'Direct conversations'
@@ -1104,10 +1162,9 @@ export function Chats() {
           ? 'Group conversations'
           : selectedSession?.name || 'Inbox';
 
-  const inboxSubtitle =
-    !hasSessions
-      ? 'Connect a WhatsApp session to load conversations here.'
-      : inboxView === 'unread'
+  const inboxSubtitle = !hasSessions
+    ? 'Connect a WhatsApp session to load conversations here.'
+    : inboxView === 'unread'
       ? `${totalUnread} unread messages waiting for action`
       : `${filteredChats.length} conversations available in this workspace`;
 
@@ -1153,7 +1210,9 @@ export function Chats() {
                       {selectedSession?.phone || 'Connect a device from the Sessions menu'}
                     </div>
                   </div>
-                  <span className={`chats-session-badge ${hasSessions ? (isSessionReady ? 'online' : 'syncing') : 'offline'}`}>
+                  <span
+                    className={`chats-session-badge ${hasSessions ? (isSessionReady ? 'online' : 'syncing') : 'offline'}`}
+                  >
                     <Wifi size={12} />
                     {hasSessions ? (isSessionReady ? 'Live' : 'Syncing') : 'Offline'}
                   </span>
@@ -1359,15 +1418,24 @@ export function Chats() {
                   <MessageSquare size={80} className="placeholder-icon" />
                 </div>
                 <h2>Chat interface ready</h2>
-                <p>Your operators can stay on this screen. As soon as a WhatsApp session is connected, chats and contacts will load here automatically.</p>
+                <p>
+                  Your operators can stay on this screen. As soon as a WhatsApp session is connected, chats and contacts
+                  will load here automatically.
+                </p>
                 <div className="chats-placeholder-grid">
                   <div className="chats-placeholder-card">
                     <strong>Keep the workspace visible</strong>
-                    <span>The inbox, conversation pane, and reply area remain in place instead of switching to a blocking dashboard.</span>
+                    <span>
+                      The inbox, conversation pane, and reply area remain in place instead of switching to a blocking
+                      dashboard.
+                    </span>
                   </div>
                   <div className="chats-placeholder-card">
                     <strong>Connect from Sessions</strong>
-                    <span>Scan or reconnect a device from the Sessions menu, then return here to continue with the same chat layout.</span>
+                    <span>
+                      Scan or reconnect a device from the Sessions menu, then return here to continue with the same chat
+                      layout.
+                    </span>
                   </div>
                 </div>
               </div>
@@ -1726,7 +1794,7 @@ export function Chats() {
                     <button
                       type="button"
                       onClick={triggerFileSelect}
-                      disabled={!canWrite || !isSessionReady || sending}
+                      disabled={!canWrite || sending}
                       className="btn-input-accessory"
                       title={t('chats.attachTitle')}
                     >
@@ -1736,7 +1804,7 @@ export function Chats() {
                     <button
                       type="button"
                       onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                      disabled={!canWrite || !isSessionReady || sending}
+                      disabled={!canWrite || sending}
                       className={`btn-input-accessory ${showEmojiPicker ? 'active' : ''}`}
                       title={t('chats.emojiTitle')}
                     >
@@ -1756,12 +1824,12 @@ export function Chats() {
                       }
                       value={messageInput}
                       onChange={e => setMessageInput(e.target.value)}
-                      disabled={!canWrite || !isSessionReady || sending}
+                      disabled={!canWrite || sending}
                       className="message-text-input"
                     />
                     <button
                       type="submit"
-                      disabled={!canWrite || !isSessionReady || (!messageInput.trim() && !attachment) || sending}
+                      disabled={!canWrite || (!messageInput.trim() && !attachment) || sending}
                       className="btn-send-message"
                       aria-label={t('chats.send')}
                     >

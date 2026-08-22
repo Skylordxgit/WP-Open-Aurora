@@ -22,6 +22,17 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     errors.push(`DATABASE_TYPE must be "sqlite" or "postgres" (got "${dbType}")`);
   }
 
+  const engineType = str('ENGINE_TYPE');
+  const supportedEngines = ['evolution-go', 'whatsapp-web.js', 'baileys'];
+  if (engineType && !supportedEngines.includes(engineType)) {
+    errors.push(`ENGINE_TYPE must be one of ${supportedEngines.join(', ')} (got "${engineType}")`);
+  }
+  if (engineType === 'evolution-go') {
+    for (const key of ['EVOLUTION_GO_BASE_URL', 'EVOLUTION_GO_API_KEY', 'EVOLUTION_GO_INSTANCE_TOKEN_SECRET']) {
+      if (!str(key)) errors.push(`${key} is required when ENGINE_TYPE=evolution-go`);
+    }
+  }
+
   if (dbType === 'postgres') {
     for (const key of ['DATABASE_HOST', 'DATABASE_USERNAME', 'DATABASE_PASSWORD']) {
       if (!str(key)) {

@@ -5,11 +5,19 @@ import { NotFoundException, ConflictException, BadRequestException } from '@nest
 import { SessionService } from './session.service';
 import { Session, SessionStatus } from './entities/session.entity';
 import { Message, MessageStatus } from '../message/entities/message.entity';
+import { SavedContact } from '../contact/entities/saved-contact.entity';
+import { ChatSnapshot } from './entities/chat-snapshot.entity';
 import { EngineFactory } from '../../engine/engine.factory';
 import { EventsGateway } from '../events/events.gateway';
 import { WebhookService } from '../webhook/webhook.service';
 import { HookManager } from '../../core/hooks';
-import { ChatSummary, IncomingMessage, EngineEventCallbacks } from '../../engine/interfaces/whatsapp-engine.interface';
+import { MediaArchiveService } from '../../common/media/media-archive.service';
+import {
+  ChatSummary,
+  IncomingMessage,
+  EngineEventCallbacks,
+  EngineStatus,
+} from '../../engine/interfaces/whatsapp-engine.interface';
 
 function createMockSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -33,6 +41,8 @@ describe('SessionService', () => {
   let service: SessionService;
   let repository: jest.Mocked<Partial<Repository<Session>>>;
   let messageRepository: jest.Mocked<Partial<Repository<Message>>>;
+  let savedContactRepository: jest.Mocked<Partial<Repository<SavedContact>>>;
+  let chatSnapshotRepository: jest.Mocked<Partial<Repository<ChatSnapshot>>>;
   let dataSource: jest.Mocked<Partial<DataSource>>;
   let engineFactory: jest.Mocked<Partial<EngineFactory>>;
   let eventsGateway: jest.Mocked<Partial<EventsGateway>>;
@@ -59,6 +69,20 @@ describe('SessionService', () => {
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
 
+    savedContactRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      create: jest.fn().mockImplementation((data: Partial<SavedContact>) => data as SavedContact),
+      save: jest.fn().mockImplementation(data => Promise.resolve(data)),
+    };
+
+    chatSnapshotRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockImplementation((data: Partial<ChatSnapshot>) => data as ChatSnapshot),
+      save: jest.fn().mockImplementation(data => Promise.resolve(data)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+
     dataSource = {
       transaction: jest.fn().mockImplementation(async (cb: (manager: unknown) => Promise<unknown>) => {
         const manager = {
@@ -76,6 +100,9 @@ describe('SessionService', () => {
       getQRCode: jest.fn().mockReturnValue(null),
       getGroups: jest.fn().mockResolvedValue([]),
       getChats: jest.fn().mockResolvedValue([]),
+      getChatHistory: jest.fn().mockResolvedValue([]),
+      getContacts: jest.fn().mockResolvedValue([]),
+      getStatus: jest.fn().mockReturnValue(EngineStatus.READY),
       sendSeen: jest.fn().mockResolvedValue(true),
       deleteChat: jest.fn().mockResolvedValue(true),
       sendChatState: jest.fn().mockResolvedValue(undefined),
@@ -93,6 +120,7 @@ describe('SessionService', () => {
       emitMessageAck: jest.fn(),
       emitMessageRevoked: jest.fn(),
       emitMessageReaction: jest.fn(),
+      emitMessageEdited: jest.fn(),
     };
 
     webhookService = {
@@ -115,6 +143,14 @@ describe('SessionService', () => {
           useValue: messageRepository,
         },
         {
+          provide: getRepositoryToken(SavedContact, 'data'),
+          useValue: savedContactRepository,
+        },
+        {
+          provide: getRepositoryToken(ChatSnapshot, 'data'),
+          useValue: chatSnapshotRepository,
+        },
+        {
           provide: getDataSourceToken('data'),
           useValue: dataSource,
         },
@@ -122,6 +158,10 @@ describe('SessionService', () => {
         { provide: EventsGateway, useValue: eventsGateway },
         { provide: WebhookService, useValue: webhookService },
         { provide: HookManager, useValue: hookManager },
+        {
+          provide: MediaArchiveService,
+          useValue: { archiveMessage: jest.fn().mockImplementation((_sessionId, message) => Promise.resolve(message)) },
+        },
       ],
     }).compile();
 
@@ -328,7 +368,7 @@ describe('SessionService', () => {
       engines: Map<string, unknown>;
     }
     const internals = (): Internals => service as unknown as Internals;
-    const reconnectState = { attempts: 1, timer: null, maxAttempts: 5, baseDelay: 5000 };
+    const reconnectState = { attempts: 1, timer: null, maxAttempts: 5, baseDelay: 5000, autoReconnect: true };
 
     it('does not create an engine when the session was already stopped (early guard)', async () => {
       const i = internals();
@@ -374,24 +414,34 @@ describe('SessionService', () => {
     it('marks the session FAILED and runs the session:error hook on a terminal engine error', async () => {
       const callbacks = await startAndCapture();
 
-      callbacks.onError?.('Failed to launch the browser process: spawn ENOENT');
+      callbacks.onError?.('Authentication failed: stored credentials were rejected');
 
       expect(repository.update).toHaveBeenCalledWith('sess-uuid-1', { status: SessionStatus.FAILED });
       expect(hookManager.execute).toHaveBeenCalledWith(
         'session:error',
-        expect.objectContaining({ reason: 'Failed to launch the browser process: spawn ENOENT' }),
+        expect.objectContaining({ reason: 'Authentication failed: stored credentials were rejected' }),
         expect.objectContaining({ sessionId: 'sess-uuid-1' }),
       );
     });
 
     it('surfaces the failure reason via lastError when the session is FAILED', async () => {
       const callbacks = await startAndCapture();
-      callbacks.onError?.('chromium missing');
+      callbacks.onError?.('Authentication failed: logged out from phone');
 
       (repository.findOne as jest.Mock).mockResolvedValue(createMockSession({ status: SessionStatus.FAILED }));
       const result = await service.findOne('sess-uuid-1');
 
-      expect(result.lastError).toBe('chromium missing');
+      expect(result.lastError).toBe('Authentication failed: logged out from phone');
+    });
+
+    it('keeps a transient engine failure reconnectable instead of terminally failing', async () => {
+      const callbacks = await startAndCapture();
+
+      callbacks.onError?.('WhatsApp Web did not finish synchronizing within 90 seconds');
+
+      expect(repository.update).toHaveBeenCalledWith('sess-uuid-1', { status: SessionStatus.DISCONNECTED });
+      expect(repository.update).not.toHaveBeenCalledWith('sess-uuid-1', { status: SessionStatus.FAILED });
+      callbacks.onReady?.('628123', 'Tester');
     });
 
     it('does not surface lastError once the session has recovered', async () => {
@@ -524,6 +574,43 @@ describe('SessionService', () => {
           waMessageId: 'canonical-out-1',
           status: 'sent',
         }),
+      );
+    });
+
+    it('matches a retry echo by deterministic client id before body fallbacks', async () => {
+      const pending = {
+        id: 'pending-retry-1',
+        sessionId: 'sess-uuid-1',
+        chatId: '111@c.us',
+        body: 'Repeated body',
+        type: 'text',
+        direction: 'outgoing',
+        status: 'failed',
+        metadata: { clientMessageId: 'CLIENT-ID-1' },
+      } as Message;
+      (messageRepository.findOne as jest.Mock).mockResolvedValueOnce(null);
+      (messageRepository.find as jest.Mock).mockResolvedValueOnce([pending]);
+      (hookManager.execute as jest.Mock).mockImplementation((_event: string, data: unknown) =>
+        Promise.resolve({ continue: true, data }),
+      );
+      const callbacks = await startAndCaptureCallbacks();
+
+      callbacks.onMessageCreate!(
+        makeMessage({
+          id: 'CLIENT-ID-1',
+          from: 'me@c.us',
+          to: '111@c.us',
+          chatId: '111@c.us',
+          body: 'Repeated body',
+          fromMe: true,
+        }),
+      );
+      await flush();
+      await flush();
+
+      expect(messageRepository.create).not.toHaveBeenCalled();
+      expect(messageRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'pending-retry-1', waMessageId: 'CLIENT-ID-1', status: 'sent' }),
       );
     });
 
@@ -864,7 +951,7 @@ describe('SessionService', () => {
         { id: '111@c.us', name: 'Live chat', isGroup: false, unreadCount: 0, timestamp: 200 },
         {
           id: '222@c.us',
-          name: '222@c.us',
+          name: '222',
           isGroup: false,
           unreadCount: 0,
           timestamp: 100,
@@ -898,7 +985,7 @@ describe('SessionService', () => {
       await expect(service.getChatsFast('sess-uuid-1')).resolves.toEqual([
         {
           id: '222@c.us',
-          name: '222@c.us',
+          name: '222',
           isGroup: false,
           unreadCount: 0,
           timestamp: 100,
@@ -940,7 +1027,7 @@ describe('SessionService', () => {
 
       expect(messageRepository.find).toHaveBeenCalledWith({
         where: { sessionId: 'sess-uuid-1' },
-        order: { createdAt: 'DESC' },
+        order: { timestamp: 'DESC', createdAt: 'DESC' },
         take: 5000,
       });
       expect(result).toEqual([
@@ -954,7 +1041,7 @@ describe('SessionService', () => {
         },
         {
           id: '628123456789@c.us',
-          name: '628123456789@c.us',
+          name: '628123456789',
           isGroup: false,
           unreadCount: 0,
           timestamp: 1700000000,
@@ -963,11 +1050,74 @@ describe('SessionService', () => {
       ]);
     });
 
-    it('should throw BadRequestException when session is not started', async () => {
+    it('returns stored chat snapshots when the session is not started', async () => {
       const session = createMockSession();
       (repository.findOne as jest.Mock).mockResolvedValue(session);
+      (chatSnapshotRepository.find as jest.Mock).mockResolvedValue([
+        {
+          sessionId: 'sess-uuid-1',
+          chatId: '628111222333@c.us',
+          name: 'Alice',
+          isGroup: false,
+          unreadCount: 1,
+          timestamp: 1700000000,
+          lastMessage: 'Saved message',
+        },
+      ]);
 
-      await expect(service.getChats('sess-uuid-1')).rejects.toThrow(BadRequestException);
+      await expect(service.getChats('sess-uuid-1')).resolves.toEqual([
+        {
+          id: '628111222333@c.us',
+          name: 'Alice',
+          isGroup: false,
+          unreadCount: 1,
+          timestamp: 1700000000,
+          lastMessage: 'Saved message',
+        },
+      ]);
+    });
+  });
+
+  describe('persistHistory', () => {
+    it('upserts a repeated WhatsApp message and enriches media without downgrading read status', async () => {
+      const stored = {
+        id: 'db-message-1',
+        sessionId: 'sess-uuid-1',
+        waMessageId: 'wa-msg-1',
+        chatId: '111@c.us',
+        from: '111@c.us',
+        to: 'me@c.us',
+        body: 'Photo',
+        type: 'image',
+        direction: 'incoming',
+        timestamp: 1706868000,
+        status: MessageStatus.READ,
+        metadata: { contact: { name: 'Alice' } },
+      } as Message;
+      (messageRepository.find as jest.Mock).mockResolvedValueOnce([stored]);
+
+      await service.persistHistory('sess-uuid-1', [
+        {
+          id: 'wa-msg-1',
+          from: '111@c.us',
+          to: 'me@c.us',
+          chatId: '111@c.us',
+          body: 'Photo',
+          type: 'image',
+          timestamp: 1706868000,
+          fromMe: false,
+          isGroup: false,
+          media: { mimetype: 'image/jpeg', data: 'base64-image' },
+        },
+      ]);
+
+      expect(messageRepository.create).not.toHaveBeenCalled();
+      expect(messageRepository.save).toHaveBeenCalledWith([stored]);
+      expect(stored.status).toBe(MessageStatus.READ);
+      expect(stored.metadata).toEqual({
+        contact: { name: 'Alice' },
+        media: { mimetype: 'image/jpeg', data: 'base64-image' },
+      });
     });
   });
 
@@ -988,11 +1138,15 @@ describe('SessionService', () => {
       expect(result).toBe(true);
     });
 
-    it('should throw BadRequestException when session is not started', async () => {
+    it('clears the stored unread count when the live session is not started', async () => {
       const session = createMockSession();
       (repository.findOne as jest.Mock).mockResolvedValue(session);
 
-      await expect(service.sendSeen('sess-uuid-1', '123@c.us')).rejects.toThrow(BadRequestException);
+      await expect(service.sendSeen('sess-uuid-1', '123@c.us')).resolves.toBe(false);
+      expect(chatSnapshotRepository.update).toHaveBeenCalledWith(
+        { sessionId: 'sess-uuid-1', chatId: '123@c.us' },
+        { unreadCount: 0 },
+      );
     });
   });
 
@@ -1094,6 +1248,61 @@ describe('SessionService', () => {
       const revokedCall = (eventsGateway.emitMessageRevoked as jest.Mock).mock.calls[0] as unknown[];
       const emittedPayload = revokedCall[1] as { body: string };
       expect(emittedPayload.body).toBe('');
+    });
+  });
+
+  describe('onMessageEdited callback', () => {
+    it('updates the durable row before publishing the edited event', async () => {
+      const session = createMockSession();
+      const stored = {
+        id: 'row-1',
+        sessionId: 'sess-uuid-1',
+        waMessageId: 'WA_MSG_1',
+        body: 'old text',
+        type: 'text',
+        metadata: {},
+      } as Message;
+      (repository.findOne as jest.Mock).mockResolvedValue(session);
+      (repository.update as jest.Mock).mockResolvedValue({ affected: 1 });
+      (messageRepository.findOne as jest.Mock).mockResolvedValue(stored);
+      (messageRepository.save as jest.Mock).mockImplementation(message => Promise.resolve(message));
+
+      await service.start('sess-uuid-1');
+      const initializeCall = mockEngine.initialize.mock.calls[0] as unknown[];
+      const callbacks = initializeCall[0] as {
+        onMessageEdited: (event: {
+          messageId: string;
+          chatId: string;
+          body: string;
+          type: 'text';
+          timestamp: number;
+        }) => void;
+      };
+
+      callbacks.onMessageEdited({
+        messageId: 'WA_MSG_1',
+        chatId: '123@c.us',
+        body: 'corrected text',
+        type: 'text',
+        timestamp: 1_700_000_000,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const saveCalls = (messageRepository.save as jest.Mock).mock.calls as unknown[][];
+      const saved = saveCalls[saveCalls.length - 1][0] as Message;
+      expect(saved.body).toBe('corrected text');
+      expect(saved.metadata?.editedAt).toBe(new Date(1_700_000_000_000).toISOString());
+      expect(eventsGateway.emitMessageEdited).toHaveBeenCalledWith(
+        'sess-uuid-1',
+        expect.objectContaining({ id: 'WA_MSG_1', body: 'corrected text' }),
+      );
+      expect(webhookService.dispatch).toHaveBeenCalledWith(
+        'sess-uuid-1',
+        'message.edited',
+        expect.objectContaining({ id: 'WA_MSG_1' }),
+      );
     });
   });
 

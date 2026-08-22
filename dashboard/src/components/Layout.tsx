@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { Suspense, useState, useEffect, useRef } from 'react';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   LayoutDashboard,
@@ -26,6 +26,7 @@ import {
   Languages,
   Users2,
   Bot,
+  Loader2,
 } from 'lucide-react';
 import { useTheme } from '../hooks/useTheme';
 import { useBranding } from '../hooks/useBranding';
@@ -168,6 +169,7 @@ const themeIcons = { light: Sun, dark: Moon, system: Monitor };
 
 export function Layout({ onLogout, omegaRole, currentUser }: LayoutProps) {
   const { t, i18n } = useTranslation();
+  const location = useLocation();
   const { theme, toggleTheme } = useTheme();
   const branding = useBranding();
   const ThemeIcon = themeIcons[theme];
@@ -356,7 +358,16 @@ export function Layout({ onLogout, omegaRole, currentUser }: LayoutProps) {
       </aside>
 
       <main className={`main-content ${isCollapsed ? 'expanded' : ''} ${isMobile ? 'mobile' : ''}`}>
-        <Outlet />
+        <Suspense
+          key={location.pathname}
+          fallback={
+            <div className="route-loading" role="status" aria-label={t('common.loading')}>
+              <Loader2 className="animate-spin" size={28} />
+            </div>
+          }
+        >
+          <Outlet />
+        </Suspense>
       </main>
     </div>
   );

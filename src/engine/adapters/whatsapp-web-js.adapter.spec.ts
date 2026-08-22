@@ -335,16 +335,18 @@ describe('WhatsAppWebJsAdapter ready synchronization', () => {
     }) as FakeClient;
     const onReady = jest.fn();
     const onError = jest.fn();
+    const onDisconnected = jest.fn();
     const internals = adapter as unknown as {
       client: FakeClient;
-      callbacks: { onReady: jest.Mock; onError: jest.Mock };
+      callbacks: { onReady: jest.Mock; onError: jest.Mock; onDisconnected: jest.Mock };
       setupEventHandlers(): void;
       status: EngineStatus;
+      tearingDown: boolean;
     };
     internals.client = client;
-    internals.callbacks = { onReady, onError };
+    internals.callbacks = { onReady, onError, onDisconnected };
     internals.setupEventHandlers();
-    return { adapter, client, onReady, onError, internals };
+    return { adapter, client, onReady, onError, onDisconnected, internals };
   }
 
   beforeEach(() => jest.useFakeTimers());
@@ -371,6 +373,16 @@ describe('WhatsAppWebJsAdapter ready synchronization', () => {
     client.eventsAttached = true;
     client.emit('ready');
     expect(internals.status).toBe(EngineStatus.READY);
+  });
+
+  it('does not emit a reconnect event during intentional client teardown', () => {
+    const { client, onDisconnected, internals } = harness(true);
+    internals.tearingDown = true;
+
+    client.emit('disconnected', 'NAVIGATION');
+
+    expect(internals.status).toBe(EngineStatus.DISCONNECTED);
+    expect(onDisconnected).not.toHaveBeenCalled();
   });
 
   it('reloads a connected page once when the event bridge remains detached', async () => {

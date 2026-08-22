@@ -79,18 +79,34 @@ services:
       - PORT=2785
       - LOG_LEVEL=${LOG_LEVEL:-info}
       # Database
-      - DATABASE_TYPE=${DATABASE_TYPE:-sqlite}
-      - DATABASE_NAME=${DATABASE_NAME:-/app/data/openwa.sqlite}
-      - DATABASE_HOST=${DATABASE_HOST:-postgres}
-      - DATABASE_PORT=${DATABASE_PORT:-5432}
+      - DATABASE_TYPE=${DATABASE_TYPE:-postgres}
+      - DATABASE_NAME=${DATABASE_NAME:-openwa}
+      # This Compose stack owns its PostgreSQL service. Keep bare-metal DATABASE_HOST settings
+      # from accidentally redirecting the container back to itself.
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
       - DATABASE_USERNAME=${DATABASE_USERNAME:-openwa}
-      # No committed default secret (M16). Empty for the default sqlite setup; the
-      # postgres service requires it (:?) when that profile is active.
-      - DATABASE_PASSWORD=${DATABASE_PASSWORD:-}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
       - DATABASE_SYNCHRONIZE=${DATABASE_SYNCHRONIZE:-false}
       # Engine
-      - ENGINE_TYPE=${ENGINE_TYPE:-whatsapp-web.js}
+      - ENGINE_TYPE=${ENGINE_TYPE:-evolution-go}
+      - EVOLUTION_GO_BASE_URL=${EVOLUTION_GO_BASE_URL:-http://evolution-go:8080}
+      - EVOLUTION_GO_API_KEY=${EVOLUTION_GO_API_KEY:?Set EVOLUTION_GO_API_KEY in .env}
+      - EVOLUTION_GO_INSTANCE_TOKEN_SECRET=${EVOLUTION_GO_INSTANCE_TOKEN_SECRET:?Set EVOLUTION_GO_INSTANCE_TOKEN_SECRET in .env}
+      - EVOLUTION_GO_REQUEST_TIMEOUT_MS=${EVOLUTION_GO_REQUEST_TIMEOUT_MS:-30000}
+      - EVOLUTION_GO_HEALTH_INTERVAL_MS=${EVOLUTION_GO_HEALTH_INTERVAL_MS:-15000}
+      - EVOLUTION_GO_WS_RECONNECT_DELAY_MS=${EVOLUTION_GO_WS_RECONNECT_DELAY_MS:-1000}
+      - AUTO_START_SESSIONS=${AUTO_START_SESSIONS:-true}
+      - SESSION_MAX_RECONNECT_ATTEMPTS=${SESSION_MAX_RECONNECT_ATTEMPTS:-0}
+      - SESSION_RECONNECT_BASE_DELAY=${SESSION_RECONNECT_BASE_DELAY:-5000}
+      - SESSION_HISTORY_SYNC_LIMIT=${SESSION_HISTORY_SYNC_LIMIT:-500}
+      - SESSION_HISTORY_SYNC_DELAY_MS=${SESSION_HISTORY_SYNC_DELAY_MS:-75}
       - SESSION_DATA_PATH=/app/data/sessions
+      - MESSAGE_RETRY_ENABLED=${MESSAGE_RETRY_ENABLED:-true}
+      - MESSAGE_RETRY_POLL_MS=${MESSAGE_RETRY_POLL_MS:-10000}
+      - MESSAGE_RETRY_MAX_ATTEMPTS=${MESSAGE_RETRY_MAX_ATTEMPTS:-5}
+      - MESSAGE_RETRY_BASE_DELAY_MS=${MESSAGE_RETRY_BASE_DELAY_MS:-15000}
+      - MESSAGE_PENDING_STALE_MS=${MESSAGE_PENDING_STALE_MS:-120000}
       - PUPPETEER_HEADLESS=${PUPPETEER_HEADLESS:-true}
       - PUPPETEER_ARGS=${PUPPETEER_ARGS:---no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu}
       # Pin the WhatsApp Web version if a session hangs at "authenticating" after scanning the QR
@@ -132,7 +148,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
-        required: false
+      evolution-go:
+        condition: service_healthy
       redis:
         condition: service_healthy
         required: false
@@ -156,11 +173,10 @@ services:
   # same port (2785) — there is no separate dashboard container. Reach it at the openwa-api
   # port directly; put your own TLS reverse proxy (nginx/Caddy/cloud LB) in front if needed.
 
-  # ===== OPTIONAL: Built-in PostgreSQL =====
+  # ===== CORE: PostgreSQL source of truth =====
   postgres:
     image: postgres:16-alpine
     container_name: openwa-postgres
-    profiles: ['postgres', 'full']
     restart: unless-stopped
     networks:
       - openwa-network
@@ -175,6 +191,7 @@ services:
       POSTGRES_DB: ${DATABASE_NAME:-openwa}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init-evolution.sql:/docker-entrypoint-initdb.d/20-evolution-databases.sql:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${DATABASE_USERNAME:-openwa}']
       interval: 5s
@@ -183,6 +200,51 @@ services:
     labels:
       - 'com.openwa.service=database'
       - 'com.openwa.builtin=true'
+
+  # ===== CORE: Evolution Go / whatsmeow transport =====
+  evolution-go:
+    image: evoapicloud/evolution-go:${EVOLUTION_GO_VERSION:-0.7.2}
+    container_name: openwa-evolution-go
+    restart: unless-stopped
+    networks:
+      - openwa-network
+    security_opt:
+      - 'no-new-privileges:true'
+    expose:
+      - '8080'
+    environment:
+      SERVER_PORT: 8080
+      CLIENT_NAME: AuroraWA
+      GLOBAL_API_KEY: ${EVOLUTION_GO_API_KEY:?Set EVOLUTION_GO_API_KEY in .env}
+      EVOLUTION_OPERATOR_EMAIL: ${EVOLUTION_OPERATOR_EMAIL:-}
+      POSTGRES_AUTH_DB: postgresql://${DATABASE_USERNAME:-openwa}:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}@postgres:5432/evogo_auth?sslmode=disable
+      POSTGRES_USERS_DB: postgresql://${DATABASE_USERNAME:-openwa}:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}@postgres:5432/evogo_users?sslmode=disable
+      DATABASE_SAVE_MESSAGES: 'true'
+      CONNECT_ON_STARTUP: 'true'
+      WEBHOOK_FILES: 'true'
+      MINIO_ENABLED: 'false'
+      EVENT_IGNORE_GROUP: 'false'
+      EVENT_IGNORE_STATUS: 'true'
+      QRCODE_MAX_COUNT: 10
+      WADEBUG: ${EVOLUTION_GO_LOG_LEVEL:-INFO}
+      LOGTYPE: console
+      LOG_DIRECTORY: /app/logs
+      OS_NAME: AuroraWA
+    volumes:
+      - evolution-data:/app/dbdata
+      - evolution-logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:8080/server/ok >/dev/null || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    labels:
+      - 'com.openwa.service=whatsapp-engine'
+      - 'com.openwa.core=true'
 
   # ===== OPTIONAL: Built-in Redis =====
   redis:
@@ -244,6 +306,10 @@ volumes:
   redis-data:
     driver: local
   minio-data:
+    driver: local
+  evolution-data:
+    driver: local
+  evolution-logs:
     driver: local
 
 networks:

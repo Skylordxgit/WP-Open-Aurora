@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, HttpException } from '@nestjs/common';
+import { Injectable, BadRequestException, HttpException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SessionService } from '../session/session.service';
@@ -11,7 +11,10 @@ import { TemplateService } from '../template/template.service';
 import { renderTemplate } from '../../common/utils/template-render';
 import { createLogger } from '../../common/services/logger.service';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
-import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
+import { EngineNotReadyError, WHATSAPP_SESSION_DISCONNECTED_MESSAGE } from '../../common/errors/engine-not-ready.error';
+import { MediaArchiveService } from '../../common/media/media-archive.service';
+import { randomUUID } from 'crypto';
+import { outboundClientMessageId, readOutboundRetryPayload } from './message-retry.types';
 
 export interface GetMessagesOptions {
   chatId?: string;
@@ -29,6 +32,7 @@ export class MessageService {
     private readonly sessionService: SessionService,
     private readonly hookManager: HookManager,
     private readonly templateService: TemplateService,
+    private readonly mediaArchiveService: MediaArchiveService,
   ) {}
 
   async sendText(sessionId: string, dto: SendTextMessageDto): Promise<MessageResponseDto> {
@@ -54,19 +58,17 @@ export class MessageService {
       chatId: finalDto.chatId,
       body: finalDto.text,
       type: 'text',
+      metadata: { retry: { kind: 'text', chatId: finalDto.chatId, text: finalDto.text } },
     });
 
     // Opt-in humanising "typing…" pause before the actual send (anti-automation signal).
     await this.simulateTypingIfEnabled(engine, sendChatId, finalDto.text);
 
     try {
-      const result = await engine.sendTextMessage(sendChatId, finalDto.text);
+      const result = await engine.sendTextMessage(sendChatId, finalDto.text, this.messageClientId(message.id));
 
       // Update with actual WhatsApp message ID and status
-      message.waMessageId = result.id;
-      message.status = MessageStatus.SENT;
-      message.timestamp = result.timestamp;
-      await this.messageRepository.save(message);
+      await this.markMessageSent(message, result);
 
       // Note: the `message:sent` hook is emitted solely by SessionService.onMessageCreate (engine
       // `message_create`) with a consistent IncomingMessage payload for ALL sends (text, media,
@@ -77,8 +79,7 @@ export class MessageService {
       };
     } catch (error) {
       // Mark as failed
-      message.status = MessageStatus.FAILED;
-      await this.messageRepository.save(message);
+      await this.markMessageFailed(message, error);
 
       // Execute hook on failure
       try {
@@ -131,25 +132,25 @@ export class MessageService {
       type: 'image',
       metadata: {
         media: { mimetype: dto.mimetype, filename: dto.filename, data: dto.base64 || dto.url },
+        retry: { kind: 'image', chatId: dto.chatId, caption: dto.caption },
       },
     });
 
     try {
-      const result = await engine.sendImageMessage(sendChatId, media);
+      const result = await engine.sendImageMessage(sendChatId, {
+        ...media,
+        clientMessageId: this.messageClientId(message.id),
+      });
 
       // Update with actual WhatsApp message ID and status
-      message.waMessageId = result.id;
-      message.status = MessageStatus.SENT;
-      message.timestamp = result.timestamp;
-      await this.messageRepository.save(message);
+      await this.markMessageSent(message, result);
 
       return {
         messageId: result.id,
         timestamp: result.timestamp,
       };
     } catch (error) {
-      message.status = MessageStatus.FAILED;
-      await this.messageRepository.save(message);
+      await this.markMessageFailed(message, error);
       throw this.toClientFacingError(error);
     }
   }
@@ -166,25 +167,25 @@ export class MessageService {
       type: 'video',
       metadata: {
         media: { mimetype: dto.mimetype, filename: dto.filename, data: dto.base64 || dto.url },
+        retry: { kind: 'video', chatId: dto.chatId, caption: dto.caption },
       },
     });
 
     try {
-      const result = await engine.sendVideoMessage(sendChatId, media);
+      const result = await engine.sendVideoMessage(sendChatId, {
+        ...media,
+        clientMessageId: this.messageClientId(message.id),
+      });
 
       // Update with actual WhatsApp message ID and status
-      message.waMessageId = result.id;
-      message.status = MessageStatus.SENT;
-      message.timestamp = result.timestamp;
-      await this.messageRepository.save(message);
+      await this.markMessageSent(message, result);
 
       return {
         messageId: result.id,
         timestamp: result.timestamp,
       };
     } catch (error) {
-      message.status = MessageStatus.FAILED;
-      await this.messageRepository.save(message);
+      await this.markMessageFailed(message, error);
       throw this.toClientFacingError(error);
     }
   }
@@ -200,25 +201,25 @@ export class MessageService {
       type: 'audio',
       metadata: {
         media: { mimetype: dto.mimetype, filename: dto.filename, data: dto.base64 || dto.url },
+        retry: { kind: 'audio', chatId: dto.chatId },
       },
     });
 
     try {
-      const result = await engine.sendAudioMessage(sendChatId, media);
+      const result = await engine.sendAudioMessage(sendChatId, {
+        ...media,
+        clientMessageId: this.messageClientId(message.id),
+      });
 
       // Update with actual WhatsApp message ID and status
-      message.waMessageId = result.id;
-      message.status = MessageStatus.SENT;
-      message.timestamp = result.timestamp;
-      await this.messageRepository.save(message);
+      await this.markMessageSent(message, result);
 
       return {
         messageId: result.id,
         timestamp: result.timestamp,
       };
     } catch (error) {
-      message.status = MessageStatus.FAILED;
-      await this.messageRepository.save(message);
+      await this.markMessageFailed(message, error);
       throw this.toClientFacingError(error);
     }
   }
@@ -235,25 +236,25 @@ export class MessageService {
       type: 'document',
       metadata: {
         media: { mimetype: dto.mimetype, filename: dto.filename, data: dto.base64 || dto.url },
+        retry: { kind: 'document', chatId: dto.chatId, caption: dto.caption },
       },
     });
 
     try {
-      const result = await engine.sendDocumentMessage(sendChatId, media);
+      const result = await engine.sendDocumentMessage(sendChatId, {
+        ...media,
+        clientMessageId: this.messageClientId(message.id),
+      });
 
       // Update with actual WhatsApp message ID and status
-      message.waMessageId = result.id;
-      message.status = MessageStatus.SENT;
-      message.timestamp = result.timestamp;
-      await this.messageRepository.save(message);
+      await this.markMessageSent(message, result);
 
       return {
         messageId: result.id,
         timestamp: result.timestamp,
       };
     } catch (error) {
-      message.status = MessageStatus.FAILED;
-      await this.messageRepository.save(message);
+      await this.markMessageFailed(message, error);
       throw this.toClientFacingError(error);
     }
   }
@@ -277,7 +278,9 @@ export class MessageService {
     const query = this.messageRepository
       .createQueryBuilder('message')
       .where('message.sessionId = :sessionId', { sessionId })
-      .orderBy('message.createdAt', 'DESC')
+      .orderBy('message.timestamp', 'DESC', 'NULLS LAST')
+      .addOrderBy('message.createdAt', 'DESC')
+      .addOrderBy('message.id', 'DESC')
       .skip(offset)
       .take(limit);
 
@@ -286,7 +289,31 @@ export class MessageService {
     }
 
     const [messages, total] = await query.getManyAndCount();
-    return { messages, total };
+    return { messages: messages.map(message => this.toPublicMessage(message)), total };
+  }
+
+  async getArchivedMedia(
+    sessionId: string,
+    messageId: string,
+  ): Promise<{ data: string; mimetype: string; filename?: string }> {
+    const message = await this.messageRepository.findOne({ where: { id: messageId, sessionId } });
+    if (!message?.mediaPath) throw new NotFoundException('Archived media is not available for this message');
+
+    try {
+      const data = await this.mediaArchiveService.read(message.mediaPath);
+      const media = this.readMediaMetadata(message.metadata);
+      return {
+        data: data.toString('base64'),
+        mimetype: message.mediaMimetype || media?.mimetype || 'application/octet-stream',
+        filename: media?.filename,
+      };
+    } catch (error) {
+      this.logger.warn(`Could not read archived media ${message.id}`, {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new NotFoundException('Archived media is not available for this message');
+    }
   }
 
   // ========== Phase 3: Extended Messaging ==========
@@ -303,6 +330,16 @@ export class MessageService {
       chatId: dto.chatId,
       body: `📍 ${dto.description || 'Location'}`,
       type: 'location',
+      metadata: {
+        retry: {
+          kind: 'location',
+          chatId: dto.chatId,
+          latitude: dto.latitude,
+          longitude: dto.longitude,
+          description: dto.description,
+          address: dto.address,
+        },
+      },
     });
 
     try {
@@ -311,21 +348,18 @@ export class MessageService {
         longitude: dto.longitude,
         description: dto.description,
         address: dto.address,
+        clientMessageId: this.messageClientId(message.id),
       });
 
       // Update with actual WhatsApp message ID and status
-      message.waMessageId = result.id;
-      message.status = MessageStatus.SENT;
-      message.timestamp = result.timestamp;
-      await this.messageRepository.save(message);
+      await this.markMessageSent(message, result);
 
       return {
         messageId: result.id,
         timestamp: result.timestamp,
       };
     } catch (error) {
-      message.status = MessageStatus.FAILED;
-      await this.messageRepository.save(message);
+      await this.markMessageFailed(message, error);
       throw this.toClientFacingError(error);
     }
   }
@@ -342,27 +376,32 @@ export class MessageService {
       chatId: dto.chatId,
       body: `📇 ${dto.contactName}`,
       type: 'contact',
+      metadata: {
+        retry: {
+          kind: 'contact',
+          chatId: dto.chatId,
+          contactName: dto.contactName,
+          contactNumber: dto.contactNumber,
+        },
+      },
     });
 
     try {
       const result = await engine.sendContactMessage(sendChatId, {
         name: dto.contactName,
         number: dto.contactNumber,
+        clientMessageId: this.messageClientId(message.id),
       });
 
       // Update with actual WhatsApp message ID and status
-      message.waMessageId = result.id;
-      message.status = MessageStatus.SENT;
-      message.timestamp = result.timestamp;
-      await this.messageRepository.save(message);
+      await this.markMessageSent(message, result);
 
       return {
         messageId: result.id,
         timestamp: result.timestamp,
       };
     } catch (error) {
-      message.status = MessageStatus.FAILED;
-      await this.messageRepository.save(message);
+      await this.markMessageFailed(message, error);
       throw this.toClientFacingError(error);
     }
   }
@@ -378,25 +417,25 @@ export class MessageService {
       type: 'sticker',
       metadata: {
         media: { mimetype: dto.mimetype, filename: dto.filename, data: dto.base64 || dto.url },
+        retry: { kind: 'sticker', chatId: dto.chatId },
       },
     });
 
     try {
-      const result = await engine.sendStickerMessage(sendChatId, media);
+      const result = await engine.sendStickerMessage(sendChatId, {
+        ...media,
+        clientMessageId: this.messageClientId(message.id),
+      });
 
       // Update with actual WhatsApp message ID and status
-      message.waMessageId = result.id;
-      message.status = MessageStatus.SENT;
-      message.timestamp = result.timestamp;
-      await this.messageRepository.save(message);
+      await this.markMessageSent(message, result);
 
       return {
         messageId: result.id,
         timestamp: result.timestamp,
       };
     } catch (error) {
-      message.status = MessageStatus.FAILED;
-      await this.messageRepository.save(message);
+      await this.markMessageFailed(message, error);
       throw this.toClientFacingError(error);
     }
   }
@@ -426,25 +465,32 @@ export class MessageService {
       type: 'text',
       metadata: {
         quotedMessage: { id: dto.quotedMessageId, body: quotedBody },
+        retry: {
+          kind: 'reply',
+          chatId: dto.chatId,
+          quotedMessageId: dto.quotedMessageId,
+          text: dto.text,
+        },
       },
     });
 
     try {
-      const result = await engine.replyToMessage(sendChatId, dto.quotedMessageId, dto.text);
+      const result = await engine.replyToMessage(
+        sendChatId,
+        dto.quotedMessageId,
+        dto.text,
+        this.messageClientId(message.id),
+      );
 
       // Update with actual WhatsApp message ID and status
-      message.waMessageId = result.id;
-      message.status = MessageStatus.SENT;
-      message.timestamp = result.timestamp;
-      await this.messageRepository.save(message);
+      await this.markMessageSent(message, result);
 
       return {
         messageId: result.id,
         timestamp: result.timestamp,
       };
     } catch (error) {
-      message.status = MessageStatus.FAILED;
-      await this.messageRepository.save(message);
+      await this.markMessageFailed(message, error);
       throw this.toClientFacingError(error);
     }
   }
@@ -468,18 +514,14 @@ export class MessageService {
       const result = await engine.forwardMessage(fromChatId, toChatId, dto.messageId);
 
       // Update with actual WhatsApp message ID and status
-      message.waMessageId = result.id;
-      message.status = MessageStatus.SENT;
-      message.timestamp = result.timestamp;
-      await this.messageRepository.save(message);
+      await this.markMessageSent(message, result);
 
       return {
         messageId: result.id,
         timestamp: result.timestamp,
       };
     } catch (error) {
-      message.status = MessageStatus.FAILED;
-      await this.messageRepository.save(message);
+      await this.markMessageFailed(message, error);
       throw this.toClientFacingError(error);
     }
   }
@@ -513,7 +555,43 @@ export class MessageService {
     },
   ): Promise<Message> {
     const session = await this.sessionService.findOne(sessionId);
+    const id = randomUUID();
+    let metadata: Record<string, unknown> = {
+      ...(data.metadata || {}),
+      clientMessageId: this.messageClientId(id),
+    };
+    let mediaPath: string | undefined;
+    let mediaMimetype: string | undefined;
+    const media = this.readMediaMetadata(metadata);
+    if (media) {
+      try {
+        const archived = await this.mediaArchiveService.archiveMedia(
+          sessionId,
+          id,
+          data.timestamp ?? Math.floor(Date.now() / 1000),
+          media,
+        );
+        mediaPath = archived.storagePath;
+        mediaMimetype = archived.mimetype;
+        metadata = {
+          ...(metadata || {}),
+          media: {
+            mimetype: archived.mimetype,
+            filename: archived.filename,
+            archived: true,
+          },
+        };
+      } catch (error) {
+        // Sending should still proceed if archival storage is temporarily unavailable. The raw
+        // metadata remains as a fallback and a later engine echo can archive the attachment.
+        this.logger.warn('Could not archive outgoing media before send', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const message = this.messageRepository.create({
+      id,
       sessionId,
       waMessageId: data.waMessageId,
       chatId: data.chatId,
@@ -524,9 +602,87 @@ export class MessageService {
       direction: MessageDirection.OUTGOING,
       timestamp: data.timestamp,
       status: data.status ?? MessageStatus.PENDING,
-      metadata: data.metadata,
+      metadata,
+      mediaPath,
+      mediaMimetype,
     });
     return this.messageRepository.save(message);
+  }
+
+  private async markMessageSent(message: Message, result: { id: string; timestamp: number }): Promise<void> {
+    message.waMessageId = result.id;
+    message.status = MessageStatus.SENT;
+    message.timestamp = result.timestamp;
+    message.nextRetryAt = null;
+    message.lastError = null;
+    if (message.metadata?.retry) {
+      const metadata = { ...message.metadata };
+      Reflect.deleteProperty(metadata, 'retry');
+      message.metadata = metadata;
+    }
+    await this.messageRepository.save(message);
+  }
+
+  private async markMessageFailed(message: Message, error: unknown): Promise<void> {
+    const reason = error instanceof Error ? error.message : String(error);
+    const retryPayload = readOutboundRetryPayload(message.metadata);
+    message.status = MessageStatus.FAILED;
+    message.lastError = reason.slice(0, 2000);
+    message.nextRetryAt =
+      retryPayload && this.isRetryableSendError(error)
+        ? new Date(Date.now() + Math.max(Number(process.env.MESSAGE_RETRY_BASE_DELAY_MS) || 15_000, 1000))
+        : null;
+    await this.messageRepository.save(message);
+  }
+
+  private isRetryableSendError(error: unknown): boolean {
+    if (error instanceof EngineNotReadyError) return true;
+    if (error instanceof HttpException) return error.getStatus() >= 500;
+    const reason = error instanceof Error ? error.message : String(error);
+    return /timeout|timed out|network|socket|econn|connection|disconnected|temporar|unavailable|502|503|504/i.test(
+      reason,
+    );
+  }
+
+  private messageClientId(messageId: string): string {
+    return outboundClientMessageId(messageId);
+  }
+
+  private readMediaMetadata(metadata?: Record<string, unknown>):
+    | {
+        mimetype: string;
+        filename?: string;
+        data?: string;
+        url?: string;
+        storagePath?: string;
+      }
+    | undefined {
+    const value = metadata?.media;
+    if (!value || typeof value !== 'object') return undefined;
+    const media = value as Record<string, unknown>;
+    const mimetype = typeof media.mimetype === 'string' ? media.mimetype : 'application/octet-stream';
+    return {
+      mimetype,
+      filename: typeof media.filename === 'string' ? media.filename : undefined,
+      data: typeof media.data === 'string' ? media.data : undefined,
+      url: typeof media.url === 'string' ? media.url : undefined,
+      storagePath: typeof media.storagePath === 'string' ? media.storagePath : undefined,
+    };
+  }
+
+  private toPublicMessage(message: Message): Message {
+    if (!message.mediaPath) return message;
+    const metadata = { ...(message.metadata || {}) };
+    const media = this.readMediaMetadata(metadata);
+    metadata.media = {
+      mimetype: message.mediaMimetype || media?.mimetype || 'application/octet-stream',
+      filename: media?.filename,
+      archived: true,
+    };
+    const result = { ...message, metadata };
+    Reflect.deleteProperty(result, 'mediaPath');
+    Reflect.deleteProperty(result, 'mediaMimetype');
+    return result;
   }
 
   // ========== Phase 3: Reactions ==========
@@ -561,7 +717,8 @@ export class MessageService {
       : 50;
 
     try {
-      return await engine.getChatHistory(chatId, safeLimit, includeMedia);
+      const history = await engine.getChatHistory(chatId, safeLimit, includeMedia);
+      return this.sessionService.persistHistory(sessionId, history, chatId);
     } catch (originalError) {
       // Privacy IDs may appear in getChats even when history is stored under the canonical phone JID.
       // Resolve and retry through engine-neutral methods; the adapter remains untouched.
@@ -569,7 +726,8 @@ export class MessageService {
         const phone = await this.resolveChatPhone(sessionId, engine, chatId);
         const canonicalChatId = phone ? await engine.getNumberId(phone) : null;
         if (canonicalChatId && canonicalChatId !== chatId) {
-          return await engine.getChatHistory(canonicalChatId, safeLimit, includeMedia);
+          const history = await engine.getChatHistory(canonicalChatId, safeLimit, includeMedia);
+          return this.sessionService.persistHistory(sessionId, history, chatId);
         }
       } catch {
         // Preserve the original history error, which is more useful to the API caller.
@@ -636,6 +794,20 @@ export class MessageService {
 
   // ========== Delete Message ==========
 
+  async editMessage(sessionId: string, dto: { chatId: string; messageId: string; text: string }): Promise<void> {
+    const engine = this.getEngine(sessionId);
+    if (!engine.editMessage) {
+      throw new BadRequestException('The active WhatsApp engine does not support message editing');
+    }
+
+    await engine.editMessage(dto.chatId, dto.messageId, dto.text);
+    const message = await this.messageRepository.findOne({ where: { sessionId, waMessageId: dto.messageId } });
+    if (!message) return;
+    message.body = dto.text;
+    message.metadata = { ...(message.metadata || {}), editedAt: new Date().toISOString() };
+    await this.messageRepository.save(message);
+  }
+
   async deleteMessage(
     sessionId: string,
     dto: { chatId: string; messageId: string; forEveryone?: boolean },
@@ -655,10 +827,10 @@ export class MessageService {
   private getEngine(sessionId: string) {
     const engine = this.sessionService.getEngine(sessionId);
     if (!engine) {
-      throw new BadRequestException(`Session '${sessionId}' is not active. Start the session first.`);
+      throw new EngineNotReadyError(WHATSAPP_SESSION_DISCONNECTED_MESSAGE);
     }
     if (engine.getStatus() !== EngineStatus.READY) {
-      throw new EngineNotReadyError();
+      throw new EngineNotReadyError(WHATSAPP_SESSION_DISCONNECTED_MESSAGE);
     }
     return engine;
   }

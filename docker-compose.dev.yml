@@ -1,10 +1,8 @@
 # OpenWA - Local smoke / quick-start compose (L22)
 #
-# This builds and runs the PRODUCTION image (same Dockerfile) against a local SQLite DB
-# with a bind-mounted ./data — it is a single-container local smoke test, NOT a
-# hot-reload development environment (there is no source mount or `start:dev`).
-# DATABASE_SYNCHRONIZE=true keeps the SQLite schema zero-config for local use; the
-# production compose (docker-compose.yml) never forces synchronize (it defaults to false).
+# This builds and runs the production image (same Dockerfile) against PostgreSQL and the
+# Evolution Go sidecar. It is a local smoke stack, not a hot-reload environment (there is
+# no source mount or `start:dev`). Aurora migrations create the durable application schema.
 #
 # Quick Start: docker compose -f docker-compose.dev.yml up -d
 
@@ -42,11 +40,32 @@ services:
       # config/cache dirs on the tmpfs or it hard-crashes at launch; the entrypoint pre-creates them. (#254)
       - XDG_CONFIG_HOME=/tmp/.config
       - XDG_CACHE_HOME=/tmp/.cache
-      - DATABASE_TYPE=sqlite
-      - DATABASE_NAME=/app/data/openwa.sqlite
-      - DATABASE_SYNCHRONIZE=true
-      - ENGINE_TYPE=whatsapp-web.js
+      - DATABASE_TYPE=postgres
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=${DATABASE_NAME:-openwa}
+      - DATABASE_USERNAME=${DATABASE_USERNAME:-openwa}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
+      - DATABASE_SYNCHRONIZE=false
+      - ENGINE_TYPE=evolution-go
+      - EVOLUTION_GO_BASE_URL=http://evolution-go:8080
+      - EVOLUTION_GO_API_KEY=${EVOLUTION_GO_API_KEY:?Set EVOLUTION_GO_API_KEY in .env}
+      - EVOLUTION_GO_INSTANCE_TOKEN_SECRET=${EVOLUTION_GO_INSTANCE_TOKEN_SECRET:?Set EVOLUTION_GO_INSTANCE_TOKEN_SECRET in .env}
+      - EVOLUTION_GO_REQUEST_TIMEOUT_MS=${EVOLUTION_GO_REQUEST_TIMEOUT_MS:-30000}
+      - EVOLUTION_GO_HEALTH_INTERVAL_MS=${EVOLUTION_GO_HEALTH_INTERVAL_MS:-15000}
+      - EVOLUTION_GO_WS_RECONNECT_DELAY_MS=${EVOLUTION_GO_WS_RECONNECT_DELAY_MS:-1000}
+      - AUTO_START_SESSIONS=${AUTO_START_SESSIONS:-true}
+      - SESSION_MAX_RECONNECT_ATTEMPTS=${SESSION_MAX_RECONNECT_ATTEMPTS:-0}
+      - SESSION_RECONNECT_BASE_DELAY=${SESSION_RECONNECT_BASE_DELAY:-5000}
+      - SESSION_HISTORY_SYNC_LIMIT=${SESSION_HISTORY_SYNC_LIMIT:-500}
+      - SESSION_HISTORY_SYNC_DELAY_MS=${SESSION_HISTORY_SYNC_DELAY_MS:-75}
       - SESSION_DATA_PATH=/app/data/sessions
+      - MESSAGE_RETRY_ENABLED=true
+      - MESSAGE_RETRY_POLL_MS=${MESSAGE_RETRY_POLL_MS:-10000}
+      - MESSAGE_RETRY_MAX_ATTEMPTS=${MESSAGE_RETRY_MAX_ATTEMPTS:-5}
+      - MESSAGE_RETRY_BASE_DELAY_MS=${MESSAGE_RETRY_BASE_DELAY_MS:-15000}
+      - MESSAGE_PENDING_STALE_MS=${MESSAGE_PENDING_STALE_MS:-120000}
+      - MESSAGE_RETRY_BATCH_SIZE=${MESSAGE_RETRY_BATCH_SIZE:-25}
       - PUPPETEER_HEADLESS=true
       - PUPPETEER_ARGS=--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu
       # Pin the WhatsApp Web version if a session hangs at "authenticating" after scanning the QR
@@ -62,6 +81,11 @@ services:
       - QUEUE_ENABLED=false
     volumes:
       - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      evolution-go:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ['CMD', 'curl', '-f', 'http://localhost:2785/api/health/ready']
@@ -70,9 +94,65 @@ services:
       retries: 3
       start_period: 30s
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: openwa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DATABASE_USERNAME:-openwa}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
+      POSTGRES_DB: ${DATABASE_NAME:-openwa}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init-evolution.sql:/docker-entrypoint-initdb.d/20-evolution-databases.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${DATABASE_USERNAME:-openwa}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  evolution-go:
+    image: evoapicloud/evolution-go:${EVOLUTION_GO_VERSION:-0.7.2}
+    container_name: openwa-evolution-go
+    restart: unless-stopped
+    environment:
+      SERVER_PORT: 8080
+      CLIENT_NAME: AuroraWA
+      GLOBAL_API_KEY: ${EVOLUTION_GO_API_KEY:?Set EVOLUTION_GO_API_KEY in .env}
+      EVOLUTION_OPERATOR_EMAIL: ${EVOLUTION_OPERATOR_EMAIL:-}
+      POSTGRES_AUTH_DB: postgresql://${DATABASE_USERNAME:-openwa}:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}@postgres:5432/evogo_auth?sslmode=disable
+      POSTGRES_USERS_DB: postgresql://${DATABASE_USERNAME:-openwa}:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}@postgres:5432/evogo_users?sslmode=disable
+      DATABASE_SAVE_MESSAGES: 'true'
+      CONNECT_ON_STARTUP: 'true'
+      WEBHOOK_FILES: 'true'
+      MINIO_ENABLED: 'false'
+      EVENT_IGNORE_GROUP: 'false'
+      EVENT_IGNORE_STATUS: 'true'
+      QRCODE_MAX_COUNT: 10
+      WADEBUG: ${EVOLUTION_GO_LOG_LEVEL:-INFO}
+      LOGTYPE: console
+      OS_NAME: AuroraWA
+    volumes:
+      - evolution-data:/app/dbdata
+      - evolution-logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:8080/server/ok >/dev/null || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
   # The dashboard SPA is bundled into the image and served by NestJS on the same port:
   # open http://localhost:2785 — there is no separate dashboard container.
 
 networks:
   default:
     name: openwa-network
+
+volumes:
+  postgres-data:
+  evolution-data:
+  evolution-logs:

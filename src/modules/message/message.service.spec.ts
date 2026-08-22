@@ -10,8 +10,9 @@ import { TemplateService } from '../template/template.service';
 import { Template } from '../template/entities/template.entity';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
 import { EngineStatus } from '../../engine/interfaces/whatsapp-engine.interface';
-import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
+import { EngineNotReadyError, WHATSAPP_SESSION_DISCONNECTED_MESSAGE } from '../../common/errors/engine-not-ready.error';
 import { RecipientUnreachableError } from '../../common/errors/recipient-unreachable.error';
+import { MediaArchiveService } from '../../common/media/media-archive.service';
 
 const mockEngineResult = { id: 'wa-msg-1', timestamp: 1706868000 };
 
@@ -30,6 +31,7 @@ function createMockEngine() {
     forwardMessage: jest.fn().mockResolvedValue(mockEngineResult),
     reactToMessage: jest.fn().mockResolvedValue(undefined),
     getMessageReactions: jest.fn().mockResolvedValue([]),
+    editMessage: jest.fn().mockResolvedValue(undefined),
     deleteMessage: jest.fn().mockResolvedValue(undefined),
     getChatHistory: jest.fn().mockResolvedValue([]),
     resolveContactPhone: jest.fn().mockResolvedValue(null),
@@ -72,6 +74,7 @@ describe('MessageService', () => {
     sessionService = {
       getEngine: jest.fn().mockReturnValue(mockEngine),
       findOne: jest.fn().mockResolvedValue({ id: 'sess-1', phone: '628123456789' }),
+      persistHistory: jest.fn().mockImplementation((_sessionId, messages) => Promise.resolve(messages)),
     };
 
     hookManager = {
@@ -92,6 +95,17 @@ describe('MessageService', () => {
         { provide: SessionService, useValue: sessionService },
         { provide: HookManager, useValue: hookManager },
         { provide: TemplateService, useValue: templateService },
+        {
+          provide: MediaArchiveService,
+          useValue: {
+            archiveMedia: jest
+              .fn()
+              .mockImplementation((_sessionId, _messageId, _timestamp, media) =>
+                Promise.resolve({ ...media, storagePath: 'whatsapp/test/media' }),
+              ),
+            read: jest.fn(),
+          },
+        },
       ],
     }).compile();
 
@@ -108,7 +122,7 @@ describe('MessageService', () => {
       await service.sendText('sess-1', { chatId: '628123456789@c.us', text: 'Hello' });
 
       expect(mockEngine.sendChatState).toHaveBeenCalledWith('628123456789@c.us', 'typing');
-      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628123456789@c.us', 'Hello');
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628123456789@c.us', 'Hello', expect.any(String));
     });
 
     it('does not send typing presence when SIMULATE_TYPING=false', async () => {
@@ -127,7 +141,7 @@ describe('MessageService', () => {
 
       expect(result.messageId).toBe('wa-msg-1');
       expect(result.timestamp).toBe(1706868000);
-      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628123456789@c.us', 'Hello');
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628123456789@c.us', 'Hello', expect.any(String));
     });
 
     it('should save outgoing message as pending before sending, then update to sent', async () => {
@@ -174,11 +188,11 @@ describe('MessageService', () => {
       );
     });
 
-    it('should throw BadRequestException if session is not active', async () => {
+    it('returns a clear reconnect error if the session is not active', async () => {
       (sessionService.getEngine as jest.Mock).mockReturnValue(undefined);
 
       await expect(service.sendText('inactive', { chatId: 'test@c.us', text: 'hello' })).rejects.toThrow(
-        BadRequestException,
+        WHATSAPP_SESSION_DISCONNECTED_MESSAGE,
       );
     });
 
@@ -202,7 +216,7 @@ describe('MessageService', () => {
 
       await service.sendText('sess-1', { chatId: '152695264563252@lid', text: 'hello' });
 
-      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628777888999@c.us', 'hello');
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628777888999@c.us', 'hello', expect.any(String));
       expect(repository.create).toHaveBeenCalledWith(expect.objectContaining({ chatId: '152695264563252@lid' }));
     });
 
@@ -222,7 +236,7 @@ describe('MessageService', () => {
       await service.sendText('sess-1', { chatId: '152695264563252@lid', text: 'hello' });
 
       expect(mockEngine.resolveContactPhone).not.toHaveBeenCalled();
-      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628777888999@c.us', 'hello');
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628777888999@c.us', 'hello', expect.any(String));
     });
 
     it('reuses the latest stored canonical address when senderPhone metadata is missing', async () => {
@@ -254,7 +268,7 @@ describe('MessageService', () => {
         take: 25,
       });
       expect(mockEngine.resolveContactPhone).not.toHaveBeenCalled();
-      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628777888999@c.us', 'hello');
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628777888999@c.us', 'hello', expect.any(String));
     });
 
     it('returns a clear client error when an unresolved privacy-id send fails', async () => {
@@ -312,6 +326,7 @@ describe('MessageService', () => {
       expect(mockEngine.sendTextMessage).toHaveBeenCalledWith(
         '628123456789@c.us',
         'Hi Alice, your order 1234 shipped.',
+        expect.any(String),
       );
       expect(result.messageId).toBe('wa-msg-1');
     });
@@ -330,6 +345,7 @@ describe('MessageService', () => {
       expect(mockEngine.sendTextMessage).toHaveBeenCalledWith(
         'test@c.us',
         'OpenWA Store\n\nHello Bob\n\nReply STOP to opt out',
+        expect.any(String),
       );
     });
 
@@ -342,7 +358,7 @@ describe('MessageService', () => {
         vars: { customer: 'Alice' },
       });
 
-      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('test@c.us', 'Hi Alice {{unknown}}');
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('test@c.us', 'Hi Alice {{unknown}}', expect.any(String));
     });
 
     it('should propagate NotFoundException when the template cannot be resolved', async () => {
@@ -400,6 +416,7 @@ describe('MessageService', () => {
     interface QbMock {
       where: jest.Mock;
       orderBy: jest.Mock;
+      addOrderBy: jest.Mock;
       skip: jest.Mock;
       take: jest.Mock;
       andWhere: jest.Mock;
@@ -409,6 +426,7 @@ describe('MessageService', () => {
       const qb: QbMock = {
         where: jest.fn(),
         orderBy: jest.fn(),
+        addOrderBy: jest.fn(),
         skip: jest.fn(),
         take: jest.fn(),
         andWhere: jest.fn(),
@@ -416,6 +434,7 @@ describe('MessageService', () => {
       };
       qb.where.mockReturnValue(qb);
       qb.orderBy.mockReturnValue(qb);
+      qb.addOrderBy.mockReturnValue(qb);
       qb.skip.mockReturnValue(qb);
       qb.take.mockReturnValue(qb);
       qb.andWhere.mockReturnValue(qb);
@@ -532,7 +551,12 @@ describe('MessageService', () => {
         text: 'This is a reply',
       });
 
-      expect(mockEngine.replyToMessage).toHaveBeenCalledWith('test@c.us', 'wa-quoted-1', 'This is a reply');
+      expect(mockEngine.replyToMessage).toHaveBeenCalledWith(
+        'test@c.us',
+        'wa-quoted-1',
+        'This is a reply',
+        expect.any(String),
+      );
     });
   });
 
@@ -651,6 +675,15 @@ describe('MessageService', () => {
       expect(result).toBe(fake);
     });
 
+    it('persists fetched history using the requested chat id', async () => {
+      const fake = [{ id: 'm1', body: 'hi', from: 'a', to: 'b', chatId: 'test@c.us' }];
+      mockEngine.getChatHistory.mockResolvedValueOnce(fake);
+
+      await service.getChatHistory('sess-1', 'test@c.us', 25, true);
+
+      expect(sessionService.persistHistory).toHaveBeenCalledWith('sess-1', fake, 'test@c.us');
+    });
+
     it('retries history with the canonical phone chat when a privacy-id fetch fails', async () => {
       const liveHistory = [{ id: 'm1', body: 'restored', fromMe: true }];
       mockEngine.getChatHistory.mockRejectedValueOnce(new Error('Chat not found')).mockResolvedValueOnce(liveHistory);
@@ -704,6 +737,31 @@ describe('MessageService', () => {
       });
 
       expect(mockEngine.deleteMessage).toHaveBeenCalledWith('test@c.us', 'wa-msg-1', false);
+    });
+  });
+
+  describe('editMessage', () => {
+    it('edits through the engine and updates the durable message row', async () => {
+      const stored = {
+        id: 'row-1',
+        sessionId: 'sess-1',
+        waMessageId: 'wa-msg-1',
+        body: 'old',
+        metadata: {},
+      } as Message;
+      (repository.findOne as jest.Mock).mockResolvedValue(stored);
+
+      await service.editMessage('sess-1', {
+        chatId: 'test@c.us',
+        messageId: 'wa-msg-1',
+        text: 'new text',
+      });
+
+      expect(mockEngine.editMessage).toHaveBeenCalledWith('test@c.us', 'wa-msg-1', 'new text');
+      const saveCalls = (repository.save as jest.Mock).mock.calls as unknown[][];
+      const saved = saveCalls[saveCalls.length - 1][0] as Message;
+      expect(saved.body).toBe('new text');
+      expect(typeof saved.metadata?.editedAt).toBe('string');
     });
   });
 });

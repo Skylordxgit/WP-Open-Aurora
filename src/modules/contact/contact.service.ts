@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { SessionService } from '../session/session.service';
@@ -6,6 +6,8 @@ import { EngineStatus, IWhatsAppEngine } from '../../engine/interfaces/whatsapp-
 import { SavedContact } from './entities/saved-contact.entity';
 import { SaveContactsDto } from './dto/saved-contact.dto';
 import { Message } from '../message/entities/message.entity';
+import { ChatSnapshot } from '../session/entities/chat-snapshot.entity';
+import { MediaArchiveService } from '../../common/media/media-archive.service';
 
 /**
  * Owns engine access for contact operations so the "session not started" guard and
@@ -19,6 +21,9 @@ export class ContactService {
     private readonly savedContactRepository: Repository<SavedContact>,
     @InjectRepository(Message, 'data')
     private readonly messageRepository: Repository<Message>,
+    @InjectRepository(ChatSnapshot, 'data')
+    private readonly chatSnapshotRepository: Repository<ChatSnapshot>,
+    private readonly mediaArchiveService: MediaArchiveService,
   ) {}
 
   private getEngine(sessionId: string): IWhatsAppEngine {
@@ -29,16 +34,58 @@ export class ContactService {
     return engine;
   }
 
-  getContacts(sessionId: string) {
-    return this.getEngine(sessionId).getContacts();
+  async getContacts(sessionId: string) {
+    const engine = this.sessionService.getEngine(sessionId);
+    if (engine?.getStatus() === EngineStatus.READY) {
+      try {
+        const contacts = await engine.getContacts();
+        await this.saveContacts(sessionId, {
+          contacts: contacts
+            .map(contact => ({
+              number: this.normalizePhoneCandidate(contact.number, contact.id),
+              name: contact.name || contact.pushName,
+              source: 'session' as const,
+            }))
+            .filter(contact => Boolean(contact.number)),
+        });
+        return contacts;
+      } catch {
+        // The database fallback below remains available while WhatsApp reconnects.
+      }
+    }
+
+    const saved = await this.listSavedContacts(sessionId);
+    return saved.map(contact => ({
+      id: `${this.normalizeDigits(contact.number)}@c.us`,
+      number: this.normalizeDigits(contact.number),
+      name: contact.name || undefined,
+      isMyContact: true,
+      isBlocked: false,
+    }));
   }
 
   async getContactById(sessionId: string, contactId: string) {
-    const contact = await this.getEngine(sessionId).getContactById(contactId);
-    if (!contact) {
+    const engine = this.sessionService.getEngine(sessionId);
+    if (engine?.getStatus() === EngineStatus.READY) {
+      try {
+        const contact = await engine.getContactById(contactId);
+        if (contact) return contact;
+      } catch {
+        // Resolve from persisted contact/chat identity below.
+      }
+    }
+
+    const [resolved] = await this.resolveContacts(sessionId, [contactId]);
+    if (!resolved?.phone && !resolved?.name) {
       throw new NotFoundException(`Contact ${contactId} not found`);
     }
-    return contact;
+    return {
+      id: contactId,
+      number: resolved.phone || '',
+      name: resolved.name || undefined,
+      isMyContact: Boolean(resolved.name),
+      isBlocked: false,
+    };
   }
 
   checkNumberExists(sessionId: string, number: string) {
@@ -50,35 +97,31 @@ export class ContactService {
   }
 
   async resolveContactPhone(sessionId: string, contactId: string): Promise<string | null> {
-    try {
-      return await this.getEngine(sessionId).resolveContactPhone(contactId);
-    } catch {
-      // The HTTP endpoint keeps its documented null-on-failure shape. Engine callers still receive
-      // transient lookup failures so they do not cache them as definitive missing mappings.
-      return null;
-    }
+    const [resolved] = await this.resolveContacts(sessionId, [contactId]);
+    return resolved?.phone || null;
   }
 
   async resolveContacts(sessionId: string, contactIds: string[]) {
-    const engine = this.getEngine(sessionId);
     const uniqueIds = [...new Set(contactIds.map(id => id.trim()).filter(Boolean))];
-    if (engine.getStatus() !== EngineStatus.READY) {
-      throw new ServiceUnavailableException('WhatsApp session is still synchronizing');
-    }
-
-    const savedContacts = await this.listSavedContacts(sessionId);
-    const storedMessages =
+    const engine = this.sessionService.getEngine(sessionId);
+    const engineReady = engine?.getStatus() === EngineStatus.READY;
+    const [savedContacts, storedMessages, snapshots] = await Promise.all([
+      this.listSavedContacts(sessionId),
       uniqueIds.length > 0
-        ? await this.messageRepository.find({
+        ? this.messageRepository.find({
             where: { sessionId, chatId: In(uniqueIds) },
-            order: { createdAt: 'DESC' },
+            order: { timestamp: 'DESC', createdAt: 'DESC' },
             take: Math.min(Math.max(uniqueIds.length * 10, 50), 1000),
           })
-        : [];
+        : Promise.resolve([]),
+      uniqueIds.length > 0
+        ? this.chatSnapshotRepository.find({ where: { sessionId, chatId: In(uniqueIds) } })
+        : Promise.resolve([]),
+    ]);
 
     let engineContacts: Awaited<ReturnType<IWhatsAppEngine['getContacts']>> = [];
     try {
-      engineContacts = await engine.getContacts();
+      if (engineReady && engine) engineContacts = await engine.getContacts();
     } catch {
       // Phone resolution below can still succeed when the contact-list cache is unavailable.
     }
@@ -94,6 +137,7 @@ export class ContactService {
       const number = this.normalizeDigits(contact.number);
       if (number) savedByNumber.set(number, contact);
     }
+    const snapshotsById = new Map(snapshots.map(snapshot => [snapshot.chatId, snapshot]));
     const storedIdentityById = new Map<string, { phone: string | null; name: string | null }>();
     for (const message of storedMessages) {
       const metadata = message.metadata as
@@ -121,22 +165,35 @@ export class ContactService {
         batch.map(async contactId => {
           const directContact = contactsById.get(contactId);
           const storedIdentity = storedIdentityById.get(contactId);
-          let phone = storedIdentity?.phone || null;
-          try {
-            phone = this.normalizePhoneCandidate(await engine.resolveContactPhone(contactId), contactId) || phone;
-          } catch {
-            // Contact/message metadata can still contain a verified phone alias.
+          const snapshot = snapshotsById.get(contactId);
+          let phone =
+            this.normalizePhoneCandidate(snapshot?.contactPhone, contactId) ||
+            storedIdentity?.phone ||
+            this.normalizePhoneCandidate(directContact?.number, contactId) ||
+            this.phoneFromDirectContactId(contactId) ||
+            null;
+          if (engineReady && engine) {
+            try {
+              phone = this.normalizePhoneCandidate(await engine.resolveContactPhone(contactId), contactId) || phone;
+            } catch {
+              // Contact/message metadata can still contain a verified phone alias.
+            }
           }
 
           const normalizedPhone =
             phone || this.normalizePhoneCandidate(directContact?.number, contactId) || storedIdentity?.phone || '';
           const phoneContact = normalizedPhone ? contactsByNumber.get(normalizedPhone) : undefined;
           const savedContact = normalizedPhone ? savedByNumber.get(normalizedPhone) : undefined;
+          const snapshotName = snapshot?.name?.trim();
           const savedName =
-            savedContact?.name?.trim() || directContact?.name?.trim() || phoneContact?.name?.trim() || null;
+            savedContact?.name?.trim() ||
+            (snapshotName && snapshotName !== contactId && !snapshotName.includes('@') ? snapshotName : null) ||
+            directContact?.name?.trim() ||
+            phoneContact?.name?.trim() ||
+            null;
           const fallbackName =
             directContact?.pushName?.trim() || phoneContact?.pushName?.trim() || storedIdentity?.name || null;
-          const name = savedName || (!normalizedPhone ? fallbackName : null);
+          const name = savedName || fallbackName;
 
           return { contactId, phone: normalizedPhone || null, name };
         }),
@@ -144,7 +201,45 @@ export class ContactService {
       resolved.push(...batchResults);
     }
 
+    await this.persistResolvedContacts(sessionId, resolved, snapshotsById);
     return resolved;
+  }
+
+  private async persistResolvedContacts(
+    sessionId: string,
+    resolved: Array<{ contactId: string; phone: string | null; name: string | null }>,
+    snapshotsById: Map<string, ChatSnapshot>,
+  ): Promise<void> {
+    const identities = resolved.filter(contact => contact.phone || contact.name);
+    if (identities.length === 0) return;
+
+    const snapshots: ChatSnapshot[] = [];
+    for (const identity of identities) {
+      const snapshot =
+        snapshotsById.get(identity.contactId) ??
+        this.chatSnapshotRepository.create({
+          sessionId,
+          chatId: identity.contactId,
+          name: identity.name || identity.phone || identity.contactId,
+          isGroup: false,
+          unreadCount: 0,
+          timestamp: 0,
+          lastMessage: null,
+          contactPhone: identity.phone,
+        });
+      snapshot.contactPhone = identity.phone || snapshot.contactPhone;
+      if (identity.name) snapshot.name = identity.name;
+      snapshots.push(snapshot);
+      snapshotsById.set(identity.contactId, snapshot);
+    }
+    await this.chatSnapshotRepository.save(snapshots);
+
+    const contacts = identities
+      .filter(identity => Boolean(identity.phone))
+      .map(identity => ({ number: identity.phone!, name: identity.name || undefined, source: 'session' as const }));
+    if (contacts.length > 0) {
+      await this.saveContacts(sessionId, { contacts });
+    }
   }
 
   private normalizePhoneCandidate(value: unknown, contactId: string): string {
@@ -157,8 +252,58 @@ export class ContactService {
     return privacyIdDigits && digits === privacyIdDigits ? '' : digits;
   }
 
-  getProfilePicture(sessionId: string, contactId: string) {
-    return this.getEngine(sessionId).getProfilePicture(contactId);
+  private phoneFromDirectContactId(contactId: string): string {
+    if (!contactId.endsWith('@c.us') && !contactId.endsWith('@s.whatsapp.net')) return '';
+    return this.normalizeDigits(contactId.split('@')[0]);
+  }
+
+  async getProfilePicture(sessionId: string, contactId: string): Promise<string | null> {
+    let snapshot = await this.chatSnapshotRepository.findOne({ where: { sessionId, chatId: contactId } });
+    const engine = this.sessionService.getEngine(sessionId);
+
+    if (engine?.getStatus() === EngineStatus.READY) {
+      try {
+        const url = await engine.getProfilePicture(contactId);
+        if (url) {
+          try {
+            const archived = await this.mediaArchiveService.archiveMedia(sessionId, `profile:${contactId}`, 1, {
+              mimetype: 'image/jpeg',
+              url,
+            });
+            snapshot =
+              snapshot ??
+              this.chatSnapshotRepository.create({
+                sessionId,
+                chatId: contactId,
+                name: contactId,
+                isGroup: contactId.endsWith('@g.us'),
+                unreadCount: 0,
+                timestamp: 0,
+                lastMessage: null,
+                contactPhone: this.phoneFromDirectContactId(contactId) || null,
+                profilePicPath: null,
+                profilePicMimetype: null,
+              });
+            snapshot.profilePicPath = archived.storagePath;
+            snapshot.profilePicMimetype = archived.mimetype;
+            await this.chatSnapshotRepository.save(snapshot);
+          } catch {
+            // A transient archive failure must not hide the still-valid live profile URL.
+          }
+          return url;
+        }
+      } catch {
+        // Serve the last archived image while WhatsApp is reconnecting.
+      }
+    }
+
+    if (!snapshot?.profilePicPath) return null;
+    try {
+      const data = await this.mediaArchiveService.read(snapshot.profilePicPath);
+      return `data:${snapshot.profilePicMimetype || 'image/jpeg'};base64,${data.toString('base64')}`;
+    } catch {
+      return null;
+    }
   }
 
   blockContact(sessionId: string, contactId: string) {

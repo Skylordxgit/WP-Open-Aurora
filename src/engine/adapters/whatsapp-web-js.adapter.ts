@@ -409,12 +409,18 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     this.client.on('disconnected', reason => {
       this.clearReadyReconcile();
       this.setStatus(EngineStatus.DISCONNECTED);
+      if (this.tearingDown) {
+        return;
+      }
       this.callbacks.onDisconnected?.(reason);
     });
 
     this.client.on('auth_failure', (message?: string) => {
       this.clearReadyReconcile();
       this.setStatus(EngineStatus.FAILED);
+      if (this.tearingDown) {
+        return;
+      }
       // Authentication failure is terminal: the stored credentials are invalid and
       // reconnecting will not help — the operator must re-scan the QR code. Route it
       // through onError (FAILED, no reconnect) rather than onDisconnected (reconnect).

@@ -362,6 +362,14 @@
   width: calc(100% - 72px);
 }
 
+.route-loading {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
 /* ==================== Mobile Styles ==================== */
 .mobile-header {
   display: none;

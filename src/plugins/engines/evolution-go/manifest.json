@@ -1,0 +1,27 @@
+{
+  "id": "evolution-go",
+  "name": "Evolution Go Engine",
+  "version": "0.7.2",
+  "type": "engine",
+  "description": "Evolution Go whatsmeow sidecar adapter with durable AuroraWA persistence",
+  "author": "AuroraWA Team",
+  "main": "index.ts",
+  "provides": ["whatsapp-engine", "multi-session", "history-sync", "media-messages", "group-management"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "title": "Evolution Go URL"
+      },
+      "apiKey": {
+        "type": "string",
+        "title": "Evolution Go global API key"
+      },
+      "instanceTokenSecret": {
+        "type": "string",
+        "title": "Per-instance token derivation secret"
+      }
+    }
+  }
+}

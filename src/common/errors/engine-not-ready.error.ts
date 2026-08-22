@@ -1,5 +1,8 @@
 import { ConflictException } from '@nestjs/common';
 
+export const WHATSAPP_SESSION_DISCONNECTED_MESSAGE =
+  'This WhatsApp chat session has been closed or disconnected. Please reconnect the WhatsApp session before sending a message.';
+
 /**
  * Thrown by the engine layer when an operation requires a connected, READY
  * WhatsApp client but the session is not in that state — e.g. it was just

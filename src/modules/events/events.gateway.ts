@@ -310,6 +310,11 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
     this.emitToRooms(sessionId, 'message.reaction', data);
   }
 
+  /** Emit a message edit after its durable row has been updated. */
+  emitMessageEdited(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'message.edited', data);
+  }
+
   /**
    * Emit webhook delivery status (broadcast to all - no session context)
    */
